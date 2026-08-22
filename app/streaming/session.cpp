@@ -61,6 +61,13 @@
 
 #define CONN_TEST_SERVER "qt.conntest.moonlight-stream.org"
 
+// Handhelds like Steam Deck aggressively power-save their Wi-Fi radio when it
+// doesn't see outbound traffic for a while, and waking it back up injects a
+// latency spike into the next packet. Sending a tiny reliable control packet
+// on this cadence keeps the radio active without waiting on gameplay traffic.
+// LiSendEmptyPayload() itself exists upstream specifically for this purpose.
+#define WIFI_KEEPALIVE_INTERVAL_MS 3000
+
 CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
     Session::clStageStarting,
     nullptr,
@@ -607,6 +614,7 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_MouseEmulationRefCount(0),
       m_FlushingWindowEventsRef(0),
       m_ShouldExitAfterQuit(false),
+      m_LastWifiKeepaliveTimeMs(0),
       m_AsyncConnectionSuccess(false),
       m_PortTestResults(0),
       m_OpusDecoder(nullptr),
@@ -1862,6 +1870,15 @@ void Session::flushWindowEvents()
     SDL_PushEvent(&flushEvent);
 }
 
+void Session::sendWifiKeepaliveIfNeeded()
+{
+    Uint32 now = SDL_GetTicks();
+    if (SDL_TICKS_PASSED(now, m_LastWifiKeepaliveTimeMs + WIFI_KEEPALIVE_INTERVAL_MS)) {
+        m_LastWifiKeepaliveTimeMs = now;
+        LiSendEmptyPayload();
+    }
+}
+
 void Session::setShouldExitAfterQuit()
 {
     m_ShouldExitAfterQuit = true;
@@ -2194,6 +2211,7 @@ void Session::execInternal()
         // and other problems.
         if (!SDL_WaitEventTimeout(&event, 1000)) {
             presence.runCallbacks();
+            sendWifiKeepaliveIfNeeded();
             continue;
         }
 #else
@@ -2210,6 +2228,7 @@ void Session::execInternal()
             SDL_Delay(10);
 #endif
             presence.runCallbacks();
+            sendWifiKeepaliveIfNeeded();
             continue;
         }
 #endif

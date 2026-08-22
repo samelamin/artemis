@@ -201,6 +201,8 @@ private:
 
     void updateOptimalWindowDisplayMode();
 
+    void sendWifiKeepaliveIfNeeded();
+
     enum class DecoderAvailability {
         None,
         Software,
@@ -294,6 +296,7 @@ private:
     int m_FlushingWindowEventsRef;
     QList<QString> m_LaunchWarnings;
     bool m_ShouldExitAfterQuit;
+    Uint32 m_LastWifiKeepaliveTimeMs;
 
     bool m_AsyncConnectionSuccess;
     int m_PortTestResults;

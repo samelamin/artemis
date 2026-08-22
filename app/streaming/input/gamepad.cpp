@@ -6,6 +6,14 @@
 
 #include <QtMath>
 
+// Steam controller type, matching upstream moonlight-common-c's Limelight.h.
+// Not yet present in the ClassicOldSong/moonlight-common-c fork Vibertemis
+// vendors, so define it locally; this becomes a harmless no-op once a future
+// submodule bump adds it upstream.
+#ifndef LI_CTYPE_STEAM
+#define LI_CTYPE_STEAM 0x04
+#endif
+
 // How long the Start button must be pressed to toggle mouse emulation
 #define MOUSE_EMULATION_LONG_PRESS_TIME 750
 
@@ -709,6 +717,19 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
 #endif
             type = LI_CTYPE_NINTENDO;
             break;
+#if SDL_VERSION_ATLEAST(2, 30, 0)
+        case SDL_CONTROLLER_TYPE_VIRTUAL:
+            // Steam Input (e.g. Steam Deck's built-in controller, or any pad
+            // managed by Steam Input) reports as VIRTUAL. Distinguish it with
+            // the Steam handle so the host can apply Steam-aware button/gyro
+            // mapping instead of treating it as a fully generic pad.
+            if (SDL_GameControllerGetSteamHandle(state->controller) != 0) {
+                type = LI_CTYPE_STEAM;
+                break;
+            }
+            type = LI_CTYPE_UNKNOWN;
+            break;
+#endif
         default:
             type = LI_CTYPE_UNKNOWN;
             break;

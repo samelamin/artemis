@@ -63,3 +63,31 @@ At audit time the Python suite contains 24 passing tests, including four upstrea
 ## Remaining validation limits
 
 Neither `qmake6`/`qmake` nor `flatpak-builder`/`flatpak` is installed on the audit host. Consequently, the accepted C++ and QML ports still require the full Linux Flatpak build and offscreen smoke checks in CI. Controller behavior, audio latency, and XWayland fallback also remain hardware/manual acceptance items; this audit does not claim they were exercised on a physical Steam Deck.
+
+## 2026-08-22 addendum: moonlight-common-c bump and input/network latency work
+
+**Audit date:** 2026-08-22
+**Audit host:** Windows, no Qt/qmake/Flatpak toolchain; Docker available.
+
+Researched Artemis's Android client and the shared `ClassicOldSong/moonlight-common-c` library (vendored by Artemis Android, Apollo, and this fork alike) for latency/decoding work not yet in Vibertemis. The Qt client's own decode/present pipeline (FFmpeg low-delay flags and slice threading in `ffmpeg.cpp`, zero-copy VAAPI DMA-BUF export in `vaapi.cpp`, and the Vulkan renderer's present-mode selection and `swapchain_depth = 1` in `plvk.cpp`) was reviewed and found to already reflect moonlight-qt's own upstream latency tuning; no changes were made there. The gap was in the vendored `moonlight-common-c` submodule and how the client uses it.
+
+| Change | Result | Rationale and verification |
+| --- | --- | --- |
+| Bump `moonlight-common-c/moonlight-common-c` submodule from `ad329b24` to fork HEAD `c999436` | Done | Five commits reviewed individually (`git log ad329b24..c999436`): a CGN subnet mask fix, an iOS-only synthesized-IPv6 VPN workaround, a cmake 4.0 compatibility bump, and `LiSendEmptyPayload()`. None touch API surface Vibertemis calls today; re-grepped `app/` for any now-stale references (none found). Same-fork fast-forward, no divergent merge. |
+| Call `LiSendEmptyPayload()` as a Wi-Fi-sleep keepalive | Done, `session.cpp`/`session.h` | Upstream's own commit message documents this function as "a workaround for client side wifi sleeps": handhelds power-save their Wi-Fi radio when idle, and waking it injects a latency spike into the next packet. Hooked into the two idle branches of `Session::execInternal()`'s main SDL event loop (`SDL_WaitEventTimeout`/`SDL_PollEvent` fallback), throttled to once per `WIFI_KEEPALIVE_INTERVAL_MS` (3000 ms) via `Session::sendWifiKeepaliveIfNeeded()`, so it fires on a wall-clock cadence independent of whether video frames are actively arriving (unlike the per-second video stats window, which pauses during static/idle scenes — exactly when a keepalive is most needed). |
+| Identify Steam Input-routed controllers as `LI_CTYPE_STEAM` | Done, `gamepad.cpp` | Canonical upstream `moonlight-stream/moonlight-common-c` added `LI_CTYPE_STEAM` (`0x04`) on 2026-08-18; it is not yet in the `ClassicOldSong` fork this project vendors. Defined locally with an `#ifndef` guard (becomes a no-op once a future submodule bump adds it upstream) and wired into the `SDL_GameControllerType` → `LI_CTYPE_*` switch: `SDL_CONTROLLER_TYPE_VIRTUAL` with a non-zero `SDL_GameControllerGetSteamHandle()` now maps to `LI_CTYPE_STEAM` instead of falling through to `LI_CTYPE_UNKNOWN`. This is how Steam Deck's built-in controller (and anything else Steam Input manages) reports itself today. Guarded behind `SDL_VERSION_ATLEAST(2, 30, 0)` since `SDL_GameControllerGetSteamHandle()` is a newer SDL2 API. |
+
+### Rejected/deferred candidate
+
+`nanors` SIMD-accelerated Reed-Solomon FEC and LTR-ACK support exist in canonical upstream `moonlight-stream/moonlight-common-c` but not in the `ClassicOldSong` fork Vibertemis vendors (confirmed: the fork still ships `reedsolomon/rs.c`, not `nanors`). This is a real potential latency/CPU win on FEC-heavy connections, but porting it is a multi-commit, invasive rewrite (SIMD dispatch, GFNI runtime detection) that conflicts with this fork's own diverged FEC/small-MTU code (`c86e053 Fix some edge case on small MTU devices using qsv codec`) and needs a real compile-and-test loop against both forks' history. Deferred rather than attempted blind.
+
+### Verification performed
+
+- Read the actual pinned/new commits in both `git log` and diff form rather than trusting commit titles.
+- Re-grepped `app/` for symbols touched by the five bumped commits; none found stale.
+- Confirmed `SDL_CONTROLLER_TYPE_VIRTUAL` and `SDL_GameControllerGetSteamHandle()` against the vendored SDL2 header (`app/Moonlight.app/Contents/Frameworks/SDL2.framework/.../SDL_gamecontroller.h`) rather than assuming the API shape.
+- Confirmed the Flatpak manifest's `artemis` module sources the whole working tree as a local `dir` source (`packaging/flatpak/com.artemisdesktop.ArtemisDesktopDev.json`), so the submodule bump requires no separate manifest pin update; CI already runs `git submodule update --init --recursive` before the build.
+
+### Not verified — same limits as the rest of this audit
+
+No qmake/Qt/Flatpak toolchain on this host means the Qt client changes (`session.cpp`, `session.h`, `gamepad.cpp`) are reviewed by hand against confirmed header signatures, not compiled locally. No physical Steam Deck, Apollo, or Vibepollo host was used to confirm the keepalive reduces observed latency spikes or that a host correctly recognizes `LI_CTYPE_STEAM`. These require the project's own Flatpak CI (`dev-build.yml`) for compile verification and a beta tester for the hardware acceptance matrix, per the process this document already establishes.
