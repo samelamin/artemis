@@ -2,6 +2,7 @@
 #include "settings/refreshrateparser.h"
 #include "settings/streamingpreferences.h"
 #include "streaming/streamutils.h"
+#include "streaming/virtualdisplaylaunch.h"
 #include "backend/richpresencemanager.h"
 #include "backend/quickmenumanager.h"
 #include "backend/servercommandmanager.h"
@@ -97,6 +98,20 @@ void Session::clStageStarting(int stage)
 
 void Session::clStageFailed(int stage, int errorCode)
 {
+    // While a virtual-display retry is in flight, stash the failure for
+    // potential final emission later but suppress the heavy UI side effects
+    // (port test + dialog). This keeps the seam from showing transient
+    // connectivity-test dialogs for attempts that will be retried.
+    if (s_ActiveSession->m_VirtualDisplayRetrySuppress) {
+        s_ActiveSession->m_VirtualDisplayLastStage = stage;
+        s_ActiveSession->m_VirtualDisplayLastErrorCode = errorCode;
+        s_ActiveSession->m_VirtualDisplayHasPendingFailure = true;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Suppressing stage failure (stage=%d err=%d) during virtual-display retry",
+                    stage, errorCode);
+        return;
+    }
+
     // Perform the port test now, while we're on the async connection thread and not blocking the UI.
     unsigned int portFlags = LiGetPortFlagsFromStage(stage);
     s_ActiveSession->m_PortTestResults = LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
@@ -617,6 +632,11 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_LastWifiKeepaliveTimeMs(0),
       m_AsyncConnectionSuccess(false),
       m_PortTestResults(0),
+      m_VirtualDisplayRetryInFlight(false),
+      m_VirtualDisplayRetrySuppress(false),
+      m_VirtualDisplayLastStage(-1),
+      m_VirtualDisplayLastErrorCode(0),
+      m_VirtualDisplayHasPendingFailure(false),
       m_OpusDecoder(nullptr),
       m_AudioRenderer(nullptr),
     m_AudioSampleCount(0),
@@ -1742,6 +1762,19 @@ bool Session::startConnectionAsync()
         enableGameOptimizations = m_Preferences->gameOptimizations;
     }
 
+    // Apollo/Vibepollo requires sops=1 to actually resize the host to the
+    // selected virtual display resolution. The helper overrides effectiveSops
+    // without mutating the user's saved gameOptimizations preference.
+    const bool useVirtualDisplay = m_Preferences->useVirtualDisplay;
+    const bool effectiveSops =
+        VirtualDisplayLaunchPolicy::resolveEffectiveSops(useVirtualDisplay,
+                                                         enableGameOptimizations);
+    if (useVirtualDisplay && !enableGameOptimizations && effectiveSops) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Virtual display enabled; forcing sops=1 on launch request "
+                    "(user gameOptimizations preference unchanged)");
+    }
+
     QString rtspSessionUrl;
 
     try {
@@ -1749,7 +1782,7 @@ bool Session::startConnectionAsync()
         http.startApp(m_Computer->currentGameId != 0 ? "resume" : "launch",
                       m_Computer->isNvidiaServerSoftware,
                       m_App.id, m_App.uuid, &m_StreamConfig,
-                      enableGameOptimizations,
+                      effectiveSops,
                       m_Preferences->playAudioOnHost,
                       m_InputHandler->getAttachedGamepadMask(),
                       !m_Preferences->multiController,
@@ -1840,17 +1873,86 @@ bool Session::startConnectionAsync()
                                                                          false);
     }
 
-    int err = LiStartConnection(&hostInfo, &m_StreamConfig, &k_ConnCallbacks,
+    // Cold virtual-display creation on the host can exceed LiStartConnection's
+    // initial readiness window. For virtual display sessions, retry the
+    // connection step (only) a bounded number of times. The /launch (or
+    // /resume) HTTP request above is intentionally NOT reissued; reissuing it
+    // could duplicate or restart Steam on the host.
+    const int maxConnectionAttempts =
+        VirtualDisplayLaunchPolicy::maxConnectionAttempts(useVirtualDisplay);
+    int err = 0;
+    bool connectionSucceeded = false;
+
+    if (useVirtualDisplay && maxConnectionAttempts > 1) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Virtual display session: enabling bounded connection "
+                    "readiness retry (max %d attempts)",
+                    maxConnectionAttempts);
+        m_VirtualDisplayRetryInFlight = true;
+        m_VirtualDisplayRetrySuppress = true;
+        m_VirtualDisplayLastStage = -1;
+        m_VirtualDisplayLastErrorCode = 0;
+        m_VirtualDisplayHasPendingFailure = false;
+    }
+
+    for (int attempt = 0; attempt < maxConnectionAttempts; ++attempt) {
+        err = LiStartConnection(&hostInfo, &m_StreamConfig, &k_ConnCallbacks,
                                 &m_VideoCallbacks, &m_AudioCallbacks,
                                 NULL, 0, NULL, 0);
+        if (err == 0) {
+            connectionSucceeded = true;
+            break;
+        }
+
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Connection attempt %d/%d failed (err=%d)",
+                    attempt + 1, maxConnectionAttempts, err);
+
+        if (attempt + 1 >= maxConnectionAttempts) {
+            // No retries left; LiStartConnection already tore down its own
+            // state on err != 0, so nothing more to do here.
+            break;
+        }
+
+        const int delayMs = VirtualDisplayLaunchPolicy::connectionRetryDelayMs(attempt);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Retrying connection in %d ms", delayMs);
+        SDL_Delay(static_cast<Uint32>(delayMs));
+    }
+
+    if (m_VirtualDisplayRetryInFlight) {
+        // Stop suppressing UI side effects regardless of success/failure.
+        m_VirtualDisplayRetrySuppress = false;
+        m_VirtualDisplayRetryInFlight = false;
+
+        if (!connectionSucceeded && m_VirtualDisplayHasPendingFailure &&
+                m_VirtualDisplayLastStage >= 0) {
+            // Surface the preserved final failure so the user gets one
+            // actionable error rather than a silenced transient blip.
+            unsigned int portFlags =
+                LiGetPortFlagsFromStage(m_VirtualDisplayLastStage);
+            m_PortTestResults =
+                LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
+
+            char failingPorts[128];
+            LiStringifyPortFlags(portFlags, ", ", failingPorts,
+                                 sizeof(failingPorts));
+            emit stageFailed(
+                QString::fromLocal8Bit(LiGetStageName(m_VirtualDisplayLastStage)),
+                m_VirtualDisplayLastErrorCode,
+                QString(failingPorts));
+            return false;
+        }
+    }
+
     if (err != 0) {
-        // We already displayed an error dialog in the stage failure
-        // listener.
+        // Non-virtual or no stashed stage failure: we already displayed an
+        // error dialog (or there is nothing actionable to surface).
         return false;
     }
 
     emit connectionStarted();
-    return true;
+    return connectionSucceeded;
 }
 
 void Session::flushWindowEvents()

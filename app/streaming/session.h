@@ -301,6 +301,15 @@ private:
     bool m_AsyncConnectionSuccess;
     int m_PortTestResults;
 
+    // Virtual-display launch / connection retry bookkeeping. These flags gate
+    // clStageFailed() suppression and let us surface a single final failure
+    // after the bounded retry loop has been exhausted.
+    bool m_VirtualDisplayRetryInFlight;
+    bool m_VirtualDisplayRetrySuppress;
+    int m_VirtualDisplayLastStage;
+    int m_VirtualDisplayLastErrorCode;
+    bool m_VirtualDisplayHasPendingFailure;
+
     int m_ActiveVideoFormat;
     int m_ActiveVideoWidth;
     int m_ActiveVideoHeight;

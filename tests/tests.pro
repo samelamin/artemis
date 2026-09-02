@@ -1,3 +1,3 @@
 TEMPLATE = subdirs
 
-SUBDIRS += refreshrate autoupdate
+SUBDIRS += refreshrate autoupdate virtualdisplay
