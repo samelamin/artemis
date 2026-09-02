@@ -970,6 +970,25 @@ Flickable {
                     ToolTip.text: qsTr("Creates a virtual display on the Apollo server for streaming. Requires Apollo server - not available with Sunshine/GeForce Experience.")
                 }
 
+                CheckBox {
+                    id: steamDeckNativeDisplayCheck
+                    width: parent.width
+                    hoverEnabled: true
+                    text: qsTr("Match Steam Deck display")
+                    font.pointSize: 12
+                    visible: SystemProperties.isSteamDeck && SystemProperties.steamDeckGamingMode && StreamingPreferences.useVirtualDisplay
+                    enabled: visible
+                    checked: StreamingPreferences.matchSteamDeckNativeDisplay
+                    onCheckedChanged: {
+                        StreamingPreferences.matchSteamDeckNativeDisplay = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Uses the current Gamescope display output for this virtual-display stream without changing saved resolution, refresh, bitrate, codec, or HDR choices. Detection falls back to the saved settings.")
+                }
+
                 // Resolution Scaling
                 CheckBox {
                     id: resolutionScalingCheck
@@ -1867,7 +1886,7 @@ Flickable {
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
                     ToolTip.text: enabled ?
-                                      qsTr("The stream will be HDR-capable, but some games may require an HDR monitor on your host PC to enable HDR mode.")
+                                      qsTr("HDR remains enabled only when this PC and the host support a common 10-bit codec. If that capability check fails, launching stops with an error instead of silently switching to SDR.")
                                     :
                                       qsTr("HDR streaming is not supported on this PC.")
                 }

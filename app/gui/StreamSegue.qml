@@ -16,7 +16,7 @@ Item {
     function stageStarting(stage)
     {
         // Update the spinner text
-        stageText = qsTr("Starting %1...").arg(stage)
+        stageText = stage === "Preparing virtual display..." ? stage : qsTr("Starting %1...").arg(stage)
     }
 
     function stageFailed(stage, errorCode, failingPorts)
@@ -46,6 +46,26 @@ Item {
         // Display the error dialog after Session::exec() returns
         streamSegueErrorDialog.text = text
         console.error(text)
+    }
+
+    function displayLaunchRecovery(text, reconnectAvailable)
+    {
+        if (quitAfter || !reconnectAvailable) {
+            displayLaunchError(text)
+            return
+        }
+
+        window.visible = true
+        streamSegueRecoveryDialog.reconnectAvailable = true
+        streamSegueRecoveryDialog.reconnectSession = session
+        streamSegueRecoveryDialog.text = text + "\n\n" + qsTr("Resume the existing host session without starting a second copy of the app?")
+        streamSegueRecoveryDialog.open()
+    }
+
+    function reconnectStarted()
+    {
+        streamSegueRecoveryDialog.visible = false
+        window.visible = false
     }
 
     function displayLaunchWarning(text)
@@ -116,6 +136,8 @@ Item {
     }
 
     StackView.onDeactivating: {
+        session.cancelRetry()
+
         // Show the toolbar again when popped off the stack
         toolBar.visible = true
 
@@ -132,6 +154,8 @@ Item {
         session.stageFailed.connect(stageFailed)
         session.connectionStarted.connect(connectionStarted)
         session.displayLaunchError.connect(displayLaunchError)
+        session.displayLaunchRecovery.connect(displayLaunchRecovery)
+        session.reconnectStarted.connect(reconnectStarted)
         session.displayLaunchWarning.connect(displayLaunchWarning)
         session.quitStarting.connect(quitStarting)
         session.sessionFinished.connect(sessionFinished)

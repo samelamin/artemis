@@ -59,6 +59,7 @@
 #define SER_CUSTOMREFRESHRATE "customrefreshrate"
 #define SER_RESOLUTIONSCALING "resolutionscaling"
 #define SER_RESOLUTIONSCALEFACTOR "resolutionscalefactor"
+#define SER_STEAMDECKNATIVEDISPLAY "steamdecknativedisplay"
 
 #define CURRENT_DEFAULT_VER 2
 
@@ -182,6 +183,7 @@ void StreamingPreferences::reload()
     customRefreshRate = settings.value(SER_CUSTOMREFRESHRATE, 59.94).toDouble();
     enableResolutionScaling = settings.value(SER_RESOLUTIONSCALING, false).toBool();
     resolutionScaleFactor = settings.value(SER_RESOLUTIONSCALEFACTOR, 100).toInt();
+    matchSteamDeckNativeDisplay = settings.value(SER_STEAMDECKNATIVEDISPLAY, false).toBool();
 
 
     // Perform default settings updates as required based on last default version
@@ -380,6 +382,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_CUSTOMREFRESHRATE, customRefreshRate);
     settings.setValue(SER_RESOLUTIONSCALING, enableResolutionScaling);
     settings.setValue(SER_RESOLUTIONSCALEFACTOR, resolutionScaleFactor);
+    settings.setValue(SER_STEAMDECKNATIVEDISPLAY, matchSteamDeckNativeDisplay);
 }
 
 int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool yuv444)

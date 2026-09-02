@@ -7,13 +7,15 @@ TARGET = tst_virtualdisplay
 
 INCLUDEPATH += $$PWD/../../app
 
-DEFINES += SESSION_CPP_SOURCE_PATH=\"\\\"$$absolute_path(../../app/streaming/session.cpp)\\\"\"
-
 SOURCES += \
     tst_virtualdisplay.cpp \
+    ../../app/backend/steamdecksession.cpp \
+    ../../app/settings/refreshrateparser.cpp \
     ../../app/streaming/virtualdisplaylaunch.cpp
 
 HEADERS += \
+    ../../app/backend/steamdecksession.h \
+    ../../app/settings/refreshrateparser.h \
     ../../app/streaming/virtualdisplaylaunch.h
 
 target.path = /app/libexec

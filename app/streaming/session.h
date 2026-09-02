@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include <QSemaphore>
 #include <QWindow>
 
@@ -10,6 +12,7 @@
 #include "video/decoder.h"
 #include "audio/renderers/renderer.h"
 #include "video/overlaymanager.h"
+#include "streaming/virtualdisplaylaunch.h"
 
 #include "backend/quickmenumanager.h"
 #include "backend/servercommandmanager.h"
@@ -128,6 +131,19 @@ public:
 
     Q_INVOKABLE void exec(QWindow* qtWindow);
 
+    Q_INVOKABLE void cancelRetry();
+
+    Q_INVOKABLE void requestReconnect();
+
+    Q_INVOKABLE void cancelSession();
+
+    // Mark the current session as intentionally disconnecting (user-initiated
+    // quit via the Quick Menu, gamepad shortcut, Ctrl+Alt+Shift+Q, or
+    // aboutToQuit). Subsequent clConnectionTerminated callbacks will be
+    // classified as intentional, so no recovery or error dialog is shown.
+    // Safe to call from any thread.
+    void markIntentionalDisconnect();
+
     static
     void getDecoderInfo(SDL_Window* window,
                         bool& isHardwareAccelerated, bool& isFullScreenOnly,
@@ -156,6 +172,10 @@ signals:
 
     void displayLaunchError(QString text);
 
+    void displayLaunchRecovery(QString text, bool reconnectAvailable);
+
+    void reconnectStarted();
+
     void displayLaunchWarning(QString text);
 
     void quitStarting();
@@ -170,7 +190,7 @@ private:
 
     bool initialize();
 
-    bool startConnectionAsync();
+    bool startConnectionAsync(bool resumeOnly = false, bool announceRetry = false);
 
     bool validateLaunch(SDL_Window* testWindow);
 
@@ -202,6 +222,16 @@ private:
     void updateOptimalWindowDisplayMode();
 
     void sendWifiKeepaliveIfNeeded();
+
+    bool applySteamDeckNativeDisplay();
+
+    void emitVirtualDisplayFinalStageFailure(int stage, int errorCode);
+
+    void emitVirtualDisplayGenericFailure(int maxAttempts);
+
+    void reconnectSession();
+
+    void handleApplicationExit();
 
     enum class DecoderAvailability {
         None,
@@ -290,7 +320,7 @@ private:
     Uint32 m_FullScreenFlag;
     QWindow* m_QtWindow;
     bool m_ThreadedExec;
-    bool m_UnexpectedTermination;
+    std::atomic<bool> m_UnexpectedTermination;
     SdlInputHandler* m_InputHandler;
     int m_MouseEmulationRefCount;
     int m_FlushingWindowEventsRef;
@@ -301,14 +331,11 @@ private:
     bool m_AsyncConnectionSuccess;
     int m_PortTestResults;
 
-    // Virtual-display launch / connection retry bookkeeping. These flags gate
-    // clStageFailed() suppression and let us surface a single final failure
-    // after the bounded retry loop has been exhausted.
-    bool m_VirtualDisplayRetryInFlight;
-    bool m_VirtualDisplayRetrySuppress;
-    int m_VirtualDisplayLastStage;
-    int m_VirtualDisplayLastErrorCode;
-    bool m_VirtualDisplayHasPendingFailure;
+    std::atomic<bool> m_VirtualDisplayRetrySuppress;
+    VirtualDisplayLaunchPolicy::ConnectionAttemptState m_ConnectionAttemptState;
+    VirtualDisplayLaunchPolicy::ConnectionCancellation m_RetryCancellation;
+    std::atomic<bool> m_ConnectionStarted;
+    std::atomic<bool> m_IntentionalDisconnect;
 
     int m_ActiveVideoFormat;
     int m_ActiveVideoWidth;

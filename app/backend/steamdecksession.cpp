@@ -1,5 +1,7 @@
 #include "steamdecksession.h"
 
+#include <QFile>
+
 namespace {
 
 bool hasDesktopToken(QString desktop, const QString &expected)
@@ -14,7 +16,39 @@ bool hasDesktopToken(QString desktop, const QString &expected)
     return false;
 }
 
+QString readDmiValue(const QString &name)
+{
+    QFile file(QStringLiteral("/sys/devices/virtual/dmi/id/") + name);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return QString();
+    }
+    return QString::fromLocal8Bit(file.readAll().trimmed());
+}
+
 } // namespace
+
+bool SteamDeckSession::isSteamDeckIdentity(const QString &productName,
+                                            const QString &boardVendor,
+                                            const QString &boardName)
+{
+    const bool recognizedProduct =
+        productName.compare(QStringLiteral("Jupiter"), Qt::CaseInsensitive) == 0 ||
+        productName.compare(QStringLiteral("Aerith"), Qt::CaseInsensitive) == 0 ||
+        productName.contains(QStringLiteral("Steam Deck"), Qt::CaseInsensitive);
+    const bool recognizedBoard =
+        boardName.compare(QStringLiteral("Jupiter"), Qt::CaseInsensitive) == 0 ||
+        boardName.compare(QStringLiteral("Aerith"), Qt::CaseInsensitive) == 0;
+    return boardVendor.contains(QStringLiteral("Valve"), Qt::CaseInsensitive) &&
+           (recognizedProduct || recognizedBoard);
+}
+
+bool SteamDeckSession::isSteamDeck()
+{
+    return isSteamDeckIdentity(
+        readDmiValue(QStringLiteral("product_name")),
+        readDmiValue(QStringLiteral("board_vendor")),
+        readDmiValue(QStringLiteral("board_name")));
+}
 
 SteamDeckSession::Mode SteamDeckSession::classify(const QProcessEnvironment &environment)
 {

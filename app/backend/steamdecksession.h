@@ -9,6 +9,10 @@ public:
 
     static Mode classify(const QProcessEnvironment &environment);
     static Mode current();
+    static bool isSteamDeck();
+    static bool isSteamDeckIdentity(const QString &productName,
+                                    const QString &boardVendor,
+                                    const QString &boardName);
 };
 
 class SessionModeProvider

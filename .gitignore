@@ -7,9 +7,17 @@ Makefile*
 .qmake.stash
 moc_*.cpp
 moc_*.h
+*.moc
 qrc_*.cpp
 ui_*.h
 *.pro.user*
+# Test artifacts only - keep source files visible. The negation rules below
+# re-include tst_*.cpp and tst_*.h so future test sources are not hidden.
+tests/**/tst_*
+!tests/**/tst_*.cpp
+!tests/**/tst_*.h
+tests/**/moc_predefs.h
+tests/**/target_wrapper.sh
 
 # Build directories
 build/

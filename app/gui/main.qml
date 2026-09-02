@@ -538,6 +538,29 @@ ApplicationWindow {
         }
     }
 
+    NavigableMessageDialog {
+        id: streamSegueRecoveryDialog
+
+        property bool reconnectAvailable: false
+        property var reconnectSession: null
+        standardButtons: reconnectAvailable ? Dialog.Yes | Dialog.No : Dialog.Ok
+
+        onAccepted: {
+            window.visible = false
+            reconnectSession.requestReconnect()
+        }
+
+        onRejected: {
+            window.visible = false
+            reconnectSession.cancelSession()
+        }
+
+        onClosed: {
+            reconnectAvailable = false
+            reconnectSession = null
+        }
+    }
+
     NavigableDialog {
         id: addPcDialog
         property string label: qsTr("Enter the IP address of your host PC:")

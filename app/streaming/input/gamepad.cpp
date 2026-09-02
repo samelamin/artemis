@@ -376,6 +376,13 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "Detected quit gamepad button combo");
 
+        // User-initiated quit. Mark the session as intentionally
+        // disconnecting so any clConnectionTerminated callback that
+        // follows is classified as IntentionalLocal.
+        if (Session::get()) {
+            Session::get()->markIntentionalDisconnect();
+        }
+
         // Push a quit event to the main loop
         SDL_Event event;
         event.type = SDL_QUIT;

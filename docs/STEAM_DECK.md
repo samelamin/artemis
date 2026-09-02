@@ -81,6 +81,65 @@ Use a host frame limiter only after the client, stream, virtual display, and gam
 targets agree; Apollo's [stutter guidance][apollo-stutter] explains why a mismatch
 can look like network jitter.
 
+### Native Steam Deck display matching
+
+**Match Steam Deck display** is available only on a real Steam Deck in Gaming Mode
+while virtual display streaming is enabled. It applies the current Gamescope SDL
+display resolution and Qt-reported refresh rate only to that stream's effective
+configuration. The saved resolution, refresh, bitrate, codec, and HDR choices are
+not changed. Detection failure leaves those saved choices unchanged. LCD and OLED
+are not inferred from 90 Hz; the client derives whatever mode is currently active,
+including integer or fractional rates represented by Vibertemis's milli-Hz parser.
+
+### Startup readiness and recovery
+
+A successful `/launch` or `/resume` response may contain the RTSP session URL in
+`sessionUrl0`, and Vibertemis passes that URL directly to the pinned Moonlight C
+client. A plain `/serverinfo` request only proves that the server and its app
+metadata are reachable; its state and `currentgame` fields do not prove that the
+new virtual-display RTSP session is ready. Vibertemis therefore uses the returned
+RTSP URL when available and otherwise retains a bounded, cancellable retry of the
+Moonlight RTSP handshake. The original `/launch` or `/resume` request is never
+reissued during those retries, which prevents a duplicate host app or session.
+
+There is no reliable client-side suspend/resume or network-restored event that can
+safely restart an established connection. If the established session terminates
+after Deck sleep or a network interruption, Vibertemis offers **Resume**. Resume
+rechecks `/serverinfo` and requires a busy host state reporting the same app ID
+before issuing `/resume`; it never issues a second `/launch` or creates a second
+host app. A failed recheck returns the user to the existing app list so the app
+can be started explicitly. If the process receives no termination callback while
+the Deck sleeps, the client cannot detect that state and the same one-tap recovery
+path remains the safe boundary.
+
+### Disconnect classification
+
+Four outcomes cover every termination the session can observe:
+
+- **Graceful host termination** — the host sends a normal termination reason
+  (`ML_ERROR_GRACEFUL_TERMINATION`, `0`); the app list reappears with no error
+  or recovery dialog.
+- **Intentional local** — the user pressed Ctrl+Alt+Shift+Q, the gamepad quit
+  combo (Start+Select+L1+R1), or clicked Disconnect/Quit in the Quick Menu,
+  or the recovery dialog was dismissed, or the application is exiting via
+  `aboutToQuit`. The session marks itself intentional before pushing
+  `SDL_QUIT`, so any subsequent termination callback is classified as
+  intentional regardless of the termination code the host happened to echo
+  back. No recovery or error dialog is shown.
+- **Unexpected mid-stream** — a non-zero termination code arrives after the
+  session has started streaming, while the user has not initiated a quit.
+  Only this case surfaces the **Resume** dialog.
+- **Pre-connection launch failure** — a non-zero termination code arrives
+  before the session is marked started. This routes through the legacy
+  actionable error dialog; no recovery is offered because the host app
+  state cannot be safely resumed.
+
+The classification is unit-tested in `tests/virtualdisplay` as
+`disconnect*` and `disconnectOutcomesAreMutuallyExclusiveAndCoverAllInputs`.
+Every combination of (errorCode, intentional, started) is exercised so that
+recovery and legacy-error dialogs are never both emitted, and each of the
+four outcomes above has a dedicated test.
+
 ## Vibepollo/Apollo refresh metadata acceptance
 
 > **Current status:** The `maxFPS` and `clientRefreshRateX100` protocol mapping is

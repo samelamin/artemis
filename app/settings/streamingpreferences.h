@@ -161,7 +161,8 @@ public:
     Q_PROPERTY(bool enableFractionalRefreshRate MEMBER enableFractionalRefreshRate NOTIFY enableFractionalRefreshRateChanged)
     Q_PROPERTY(double customRefreshRate MEMBER customRefreshRate NOTIFY customRefreshRateChanged)
     Q_PROPERTY(bool enableResolutionScaling MEMBER enableResolutionScaling NOTIFY enableResolutionScalingChanged)
-    Q_PROPERTY(int resolutionScaleFactor MEMBER resolutionScaleFactor NOTIFY resolutionScaleFactorChanged);
+    Q_PROPERTY(int resolutionScaleFactor MEMBER resolutionScaleFactor NOTIFY resolutionScaleFactorChanged)
+    Q_PROPERTY(bool matchSteamDeckNativeDisplay MEMBER matchSteamDeckNativeDisplay NOTIFY matchSteamDeckNativeDisplayChanged);
 
     Q_INVOKABLE bool retranslate();
 
@@ -212,6 +213,7 @@ public:
     double customRefreshRate;
     bool enableResolutionScaling;
     int resolutionScaleFactor;
+    bool matchSteamDeckNativeDisplay;
 
 signals:
     void displayModeChanged();
@@ -257,6 +259,7 @@ signals:
     void customRefreshRateChanged();
     void enableResolutionScalingChanged();
     void resolutionScaleFactorChanged();
+    void matchSteamDeckNativeDisplayChanged();
 
 private:
     explicit StreamingPreferences(QQmlEngine *qmlEngine);

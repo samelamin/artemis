@@ -184,7 +184,14 @@ void QuickMenuManager::disconnect()
 {
     qDebug() << "QuickMenuManager: Disconnect requested";
     emit disconnectRequested();
-    
+
+    // Mark this as a user-initiated disconnect so any clConnectionTerminated
+    // callback that follows the SDL_QUIT path is classified as IntentionalLocal
+    // and never surfaces a recovery or error dialog.
+    if (Session::get()) {
+        Session::get()->markIntentionalDisconnect();
+    }
+
     // Send SDL quit event to disconnect
     SDL_Event quitEvent;
     quitEvent.type = SDL_QUIT;

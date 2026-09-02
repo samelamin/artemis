@@ -4,6 +4,7 @@
 #include "streaming/streamutils.h"
 #include "streaming/virtualdisplaylaunch.h"
 #include "backend/richpresencemanager.h"
+#include "backend/steamdecksession.h"
 #include "backend/quickmenumanager.h"
 #include "backend/servercommandmanager.h"
 #include "backend/clipboardmanager.h"
@@ -46,6 +47,7 @@
 #define SDL_CODE_GAMECONTROLLER_SET_MOTION_EVENT_STATE 103
 #define SDL_CODE_GAMECONTROLLER_SET_CONTROLLER_LED 104
 #define SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS 105
+#define SDL_CODE_RECONNECT_SESSION 106
 
 #include <openssl/rand.h>
 
@@ -90,31 +92,27 @@ QSemaphore Session::s_ActiveSessionSemaphore(1);
 
 void Session::clStageStarting(int stage)
 {
-    // We know this is called on the same thread as LiStartConnection()
-    // which happens to be the main thread, so it's cool to interact
-    // with the GUI in these callbacks.
+    if (s_ActiveSession->m_VirtualDisplayRetrySuppress.load()) {
+        return;
+    }
     emit s_ActiveSession->stageStarting(QString::fromLocal8Bit(LiGetStageName(stage)));
 }
 
 void Session::clStageFailed(int stage, int errorCode)
 {
-    // While a virtual-display retry is in flight, stash the failure for
-    // potential final emission later but suppress the heavy UI side effects
-    // (port test + dialog). This keeps the seam from showing transient
-    // connectivity-test dialogs for attempts that will be retried.
-    if (s_ActiveSession->m_VirtualDisplayRetrySuppress) {
-        s_ActiveSession->m_VirtualDisplayLastStage = stage;
-        s_ActiveSession->m_VirtualDisplayLastErrorCode = errorCode;
-        s_ActiveSession->m_VirtualDisplayHasPendingFailure = true;
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "Suppressing stage failure (stage=%d err=%d) during virtual-display retry",
-                    stage, errorCode);
+    if (s_ActiveSession->m_VirtualDisplayRetrySuppress.load()) {
+        s_ActiveSession->m_ConnectionAttemptState.setStageFailure(stage, errorCode);
         return;
     }
 
-    // Perform the port test now, while we're on the async connection thread and not blocking the UI.
     unsigned int portFlags = LiGetPortFlagsFromStage(stage);
-    s_ActiveSession->m_PortTestResults = LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
+    if (portFlags != 0) {
+        s_ActiveSession->m_PortTestResults =
+            LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
+    }
+    else {
+        s_ActiveSession->m_PortTestResults = 0;
+    }
 
     char failingPorts[128];
     LiStringifyPortFlags(portFlags, ", ", failingPorts, sizeof(failingPorts));
@@ -123,61 +121,117 @@ void Session::clStageFailed(int stage, int errorCode)
 
 void Session::clConnectionTerminated(int errorCode)
 {
-    unsigned int portFlags = LiGetPortFlagsFromTerminationErrorCode(errorCode);
-    s_ActiveSession->m_PortTestResults = LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
-
-    // Display the termination dialog if this was not intended
-    switch (errorCode) {
-    case ML_ERROR_GRACEFUL_TERMINATION:
-        break;
-
-    case ML_ERROR_NO_VIDEO_TRAFFIC:
-        s_ActiveSession->m_UnexpectedTermination = true;
-
-        char ports[128];
-        SDL_assert(portFlags != 0);
-        LiStringifyPortFlags(portFlags, ", ", ports, sizeof(ports));
-        emit s_ActiveSession->displayLaunchError(tr("No video received from host.") + "\n\n"+
-                                                 tr("Check your firewall and port forwarding rules for port(s): %1").arg(ports));
-        break;
-
-    case ML_ERROR_NO_VIDEO_FRAME:
-        s_ActiveSession->m_UnexpectedTermination = true;
-        emit s_ActiveSession->displayLaunchError(tr("Your network connection isn't performing well. Reduce your video bitrate setting or try a faster connection."));
-        break;
-
-    case ML_ERROR_PROTECTED_CONTENT:
-    case ML_ERROR_UNEXPECTED_EARLY_TERMINATION:
-        s_ActiveSession->m_UnexpectedTermination = true;
-        emit s_ActiveSession->displayLaunchError(tr("Something went wrong on your host PC when starting the stream.") + "\n\n" +
-                                                 tr("Make sure you don't have any DRM-protected content open on your host PC. You can also try restarting your host PC."));
-        break;
-
-    case ML_ERROR_FRAME_CONVERSION:
-        s_ActiveSession->m_UnexpectedTermination = true;
-        emit s_ActiveSession->displayLaunchError(tr("The host PC reported a fatal video encoding error.") + "\n\n" +
-                                                 tr("Try disabling HDR mode, changing the streaming resolution, or changing your host PC's display resolution."));
-        break;
-
-    default:
-        s_ActiveSession->m_UnexpectedTermination = true;
-
-        // We'll assume large errors are hex values
-        bool hexError = qAbs(errorCode) > 1000;
-        emit s_ActiveSession->displayLaunchError(tr("Connection terminated") + "\n\n" +
-                                                 tr("Error code: %1").arg(errorCode, hexError ? 8 : 0, hexError ? 16 : 10, QChar('0')));
-        break;
+    if (s_ActiveSession->m_VirtualDisplayRetrySuppress.load()) {
+        s_ActiveSession->m_ConnectionAttemptState.setConnectionTermination();
+        return;
     }
 
-    SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                 "Connection terminated: %d",
-                 errorCode);
+    const bool gracefulHost = errorCode == ML_ERROR_GRACEFUL_TERMINATION;
+    const bool intentionalLocal =
+        s_ActiveSession->m_IntentionalDisconnect.load();
+    const bool connectionStarted =
+        s_ActiveSession->m_ConnectionStarted.load();
 
-    // Push a quit event to the main loop
-    SDL_Event event;
-    event.type = SDL_QUIT;
-    event.quit.timestamp = SDL_GetTicks();
-    SDL_PushEvent(&event);
+    const bool surfaceRecovery =
+        VirtualDisplayLaunchPolicy::shouldSurfaceRecovery(
+            errorCode, intentionalLocal, connectionStarted);
+    const bool surfaceError =
+        VirtualDisplayLaunchPolicy::shouldSurfaceError(
+            errorCode, intentionalLocal, connectionStarted);
+
+    const unsigned int portFlags =
+        LiGetPortFlagsFromTerminationErrorCode(errorCode);
+
+    // Only run the connectivity test when we are actually going to surface
+    // something to the user. Graceful/intentional terminations and silent
+    // paths must skip the connectivity test entirely: it initialises the
+    // platform socket layer, performs DNS, and burns a non-trivial budget,
+    // all for a result we will never display.
+    //
+    // LiGetPortFlagsFromTerminationErrorCode() only returns non-zero for
+    // ML_ERROR_NO_VIDEO_TRAFFIC; every other surfaced code resolves to
+    // portFlags == 0, which LiTestClientConnectivity() already short-
+    // circuits to 0. Guard it explicitly so a future addition cannot
+    // regress into an unconditional network round-trip on a silent path.
+    if ((surfaceRecovery || surfaceError) && portFlags != 0) {
+        s_ActiveSession->m_PortTestResults =
+            LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
+    }
+    else {
+        s_ActiveSession->m_PortTestResults = 0;
+    }
+
+    s_ActiveSession->m_UnexpectedTermination.store(surfaceRecovery);
+
+    if (surfaceRecovery) {
+        QString errorText;
+        if (errorCode == ML_ERROR_NO_VIDEO_TRAFFIC) {
+            char ports[128];
+            LiStringifyPortFlags(portFlags, ", ", ports, sizeof(ports));
+            errorText = tr("No video received from host.") + "\n\n" +
+                        tr("Check your firewall and port forwarding rules for port(s): %1").arg(QString(ports));
+        }
+        else if (errorCode == ML_ERROR_NO_VIDEO_FRAME) {
+            errorText = tr("Your network connection isn't performing well. Reduce your video bitrate setting or try a faster connection.");
+        }
+        else if (errorCode == ML_ERROR_PROTECTED_CONTENT ||
+                 errorCode == ML_ERROR_UNEXPECTED_EARLY_TERMINATION) {
+            errorText = tr("Something went wrong on your host PC when starting the stream.") + "\n\n" +
+                        tr("Make sure you don't have any DRM-protected content open on your host PC. You can also try restarting your host PC.");
+        }
+        else if (errorCode == ML_ERROR_FRAME_CONVERSION) {
+            errorText = tr("The host PC reported a fatal video encoding error.") + "\n\n" +
+                        tr("Try disabling HDR mode, changing the streaming resolution, or changing your host PC's display resolution.");
+        }
+        else {
+            const bool hexError = qAbs(errorCode) > 1000;
+            errorText = tr("Connection terminated") + "\n\n" +
+                        tr("Error code: %1").arg(errorCode, hexError ? 8 : 0, hexError ? 16 : 10, QChar('0'));
+        }
+        emit s_ActiveSession->displayLaunchRecovery(errorText, true);
+    }
+    else if (surfaceError) {
+        if (errorCode == ML_ERROR_NO_VIDEO_TRAFFIC) {
+            char ports[128];
+            LiStringifyPortFlags(portFlags, ", ", ports, sizeof(ports));
+            emit s_ActiveSession->displayLaunchError(tr("No video received from host.") + "\n\n"+
+                                                     tr("Check your firewall and port forwarding rules for port(s): %1").arg(QString(ports)));
+        }
+        else if (errorCode == ML_ERROR_NO_VIDEO_FRAME) {
+            emit s_ActiveSession->displayLaunchError(tr("Your network connection isn't performing well. Reduce your video bitrate setting or try a faster connection."));
+        }
+        else if (errorCode == ML_ERROR_PROTECTED_CONTENT ||
+                 errorCode == ML_ERROR_UNEXPECTED_EARLY_TERMINATION) {
+            emit s_ActiveSession->displayLaunchError(tr("Something went wrong on your host PC when starting the stream.") + "\n\n" +
+                                                     tr("Make sure you don't have any DRM-protected content open on your host PC. You can also try restarting your host PC."));
+        }
+        else if (errorCode == ML_ERROR_FRAME_CONVERSION) {
+            emit s_ActiveSession->displayLaunchError(tr("The host PC reported a fatal video encoding error.") + "\n\n" +
+                                                     tr("Try disabling HDR mode, changing the streaming resolution, or changing your host PC's display resolution."));
+        }
+        else {
+            const bool hexError = qAbs(errorCode) > 1000;
+            emit s_ActiveSession->displayLaunchError(tr("Connection terminated") + "\n\n" +
+                                                     tr("Error code: %1").arg(errorCode, hexError ? 8 : 0, hexError ? 16 : 10, QChar('0')));
+        }
+    }
+    else if (!gracefulHost && !intentionalLocal) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Connection terminated without error dialog: %d",
+                    errorCode);
+    }
+
+    // Push a quit event to the main loop. The recovery flow relies on the
+    // main thread observing this SDL_QUIT so the deferred cleanup task can
+    // release connection-scoped resources. We push it for every class except
+    // the recovery path, which intentionally keeps the session alive until
+    // the user picks Resume or declines.
+    if (!surfaceRecovery) {
+        SDL_Event event;
+        event.type = SDL_QUIT;
+        event.quit.timestamp = SDL_GetTicks();
+        SDL_PushEvent(&event);
+    }
 }
 
 void Session::clLogMessage(const char* format, ...)
@@ -632,11 +686,9 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_LastWifiKeepaliveTimeMs(0),
       m_AsyncConnectionSuccess(false),
       m_PortTestResults(0),
-      m_VirtualDisplayRetryInFlight(false),
       m_VirtualDisplayRetrySuppress(false),
-      m_VirtualDisplayLastStage(-1),
-      m_VirtualDisplayLastErrorCode(0),
-      m_VirtualDisplayHasPendingFailure(false),
+      m_ConnectionStarted(false),
+      m_IntentionalDisconnect(false),
       m_OpusDecoder(nullptr),
       m_AudioRenderer(nullptr),
     m_AudioSampleCount(0),
@@ -645,6 +697,10 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
     m_ServerCommandManager(new ServerCommandManager()),
     m_ClipboardManager(ClipboardManager::instance())
 {
+    connect(QCoreApplication::instance(),
+            &QCoreApplication::aboutToQuit,
+            this,
+            &Session::handleApplicationExit);
 }
 
 bool Session::initialize()
@@ -788,6 +844,12 @@ bool Session::initialize()
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Video bitrate: %d kbps",
                 m_StreamConfig.bitrate);
+
+    if (!applySteamDeckNativeDisplay()) {
+        // Steam Deck native display matching is unavailable on this host;
+        // fall back to saved resolution/refresh without an info-level log so
+        // we don't spam non-Deck sessions.
+    }
 
     RAND_bytes(reinterpret_cast<unsigned char*>(m_StreamConfig.remoteInputAesKey),
                sizeof(m_StreamConfig.remoteInputAesKey));
@@ -1195,17 +1257,34 @@ bool Session::validateLaunch(SDL_Window* testWindow)
     }
 
     if (m_Preferences->enableHdr) {
+        if (!VirtualDisplayLaunchPolicy::explicitHdrCanStart(
+                true,
+                (m_SupportedVideoFormats & VIDEO_FORMAT_MASK_10BIT) != 0,
+                (m_Computer->serverCodecModeSupport & SCM_MASK_10BIT) != 0)) {
+            if ((m_SupportedVideoFormats & VIDEO_FORMAT_MASK_10BIT) == 0) {
+                emit displayLaunchError(
+                    tr("HDR is enabled, but this PC's GPU doesn't support 10-bit HEVC or AV1 decoding."));
+            }
+            else {
+                emit displayLaunchError(
+                    tr("HDR is enabled, but your host PC doesn't advertise a 10-bit encoder required for HDR streaming."));
+            }
+            return false;
+        }
         if (m_Preferences->videoCodecConfig == StreamingPreferences::VCC_FORCE_H264) {
-            emitLaunchWarning(tr("HDR is not supported using the H.264 codec."));
-            m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_MASK_10BIT);
+            emit displayLaunchError(
+                tr("HDR is not supported with the explicitly selected H.264 codec. Select HEVC, AV1, or Automatic."));
+            return false;
         }
         else if (!(m_SupportedVideoFormats & VIDEO_FORMAT_MASK_10BIT)) {
-            emitLaunchWarning(tr("This PC's GPU doesn't support 10-bit HEVC or AV1 decoding for HDR streaming."));
+            emit displayLaunchError(
+                tr("HDR is enabled, but this PC's GPU doesn't support 10-bit HEVC or AV1 decoding."));
+            return false;
         }
-        // Check that the server GPU supports HDR
         else if (m_SupportedVideoFormats.maskByServerCodecModes(m_Computer->serverCodecModeSupport & SCM_MASK_10BIT) == 0) {
-            emitLaunchWarning(tr("Your host PC doesn't support HDR streaming."));
-            m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_MASK_10BIT);
+            emit displayLaunchError(
+                tr("HDR is enabled, but your host PC doesn't advertise a 10-bit encoder required for HDR streaming."));
+            return false;
         }
         else if (m_Preferences->videoCodecConfig != StreamingPreferences::VCC_AUTO) { // Auto was already checked during init
             bool displayedHdrSoftwareDecodeWarning = false;
@@ -1235,9 +1314,15 @@ bool Session::validateLaunch(SDL_Window* testWindow)
                            !displayedHdrSoftwareDecodeWarning) {
                     emitLaunchWarning(tr("Using software decoding due to your selection to force HDR without GPU support. This may cause poor streaming performance."));
                     displayedHdrSoftwareDecodeWarning = true;
-                }
             }
-            if (m_SupportedVideoFormats.maskByServerCodecModes(m_Computer->serverCodecModeSupport & SCM_HEVC_MAIN10)) {
+        }
+        if (m_Preferences->videoCodecConfig == StreamingPreferences::VCC_FORCE_AV1 &&
+                !(m_SupportedVideoFormats & VIDEO_FORMAT_MASK_AV1)) {
+            emit displayLaunchError(
+                tr("HDR is enabled with AV1 forced, but AV1 Main10 decoding is not available on this PC. Select Automatic or HEVC."));
+            return false;
+        }
+        if (m_SupportedVideoFormats.maskByServerCodecModes(m_Computer->serverCodecModeSupport & SCM_HEVC_MAIN10)) {
                 auto da = getDecoderAvailability(testWindow,
                                                  m_Preferences->videoDecoderSelection,
                                                  VIDEO_FORMAT_H265_MAIN10,
@@ -1256,13 +1341,13 @@ bool Session::validateLaunch(SDL_Window* testWindow)
                 }
             }
         }
-
-        // Check for compatibility between server and client codecs
-        if ((m_SupportedVideoFormats & VIDEO_FORMAT_MASK_10BIT) && // Ignore this check if we already failed one above
-            !(m_SupportedVideoFormats.maskByServerCodecModes(m_Computer->serverCodecModeSupport) & VIDEO_FORMAT_MASK_10BIT)) {
-            emitLaunchWarning(tr("Your host PC and client PC don't support the same HDR video codecs."));
-            m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_MASK_10BIT);
+        if (m_Preferences->videoCodecConfig == StreamingPreferences::VCC_FORCE_HEVC &&
+                !(m_SupportedVideoFormats & VIDEO_FORMAT_MASK_H265)) {
+            emit displayLaunchError(
+                tr("HDR is enabled with HEVC forced, but HEVC Main10 encoding or decoding is not available. Select Automatic or AV1."));
+            return false;
         }
+
     }
 
     if (m_Preferences->enableYUV444) {
@@ -1402,7 +1487,7 @@ private:
     {
         // Only quit the running app if our session terminated gracefully
         bool shouldQuit =
-                !m_Session->m_UnexpectedTermination &&
+                !m_Session->m_UnexpectedTermination.load() &&
                 (m_Session->m_Preferences->quitAppAfter ||
                  m_Session->m_ShouldExitAfterQuit);
 
@@ -1653,6 +1738,72 @@ void Session::updateOptimalWindowDisplayMode()
     SDL_SetWindowDisplayMode(m_Window, &bestMode);
 }
 
+bool Session::applySteamDeckNativeDisplay()
+{
+    if (!m_Preferences->useVirtualDisplay ||
+            !m_Preferences->matchSteamDeckNativeDisplay ||
+            !SteamDeckSession::isSteamDeck() ||
+            SteamDeckSession::current() != SteamDeckSession::Gaming) {
+        return false;
+    }
+
+    QScreen* screen = m_QtWindow != nullptr ? m_QtWindow->screen() : nullptr;
+    if (screen == nullptr) {
+        return false;
+    }
+
+    int displayIndex = 0;
+    bool foundDisplay = false;
+    for (int i = 0; i < SDL_GetNumVideoDisplays(); ++i) {
+        SDL_Rect displayBounds;
+        if (SDL_GetDisplayBounds(i, &displayBounds) == 0 &&
+                displayBounds.x == screen->geometry().x() &&
+                displayBounds.y == screen->geometry().y()) {
+            displayIndex = i;
+            foundDisplay = true;
+            break;
+        }
+    }
+    if (!foundDisplay) {
+        return false;
+    }
+
+    SDL_DisplayMode currentMode;
+    if (SDL_GetCurrentDisplayMode(displayIndex, &currentMode) != 0 ||
+            currentMode.w <= 0 || currentMode.h <= 0) {
+        return false;
+    }
+
+    double refreshHz = screen->refreshRate();
+    if (!qIsFinite(refreshHz) || refreshHz <= 0) {
+        refreshHz = currentMode.refresh_rate;
+    }
+
+    const VirtualDisplayLaunchPolicy::DeckDisplayResolution resolution =
+        VirtualDisplayLaunchPolicy::resolveSteamDeckNativeDisplay(
+            m_Preferences->matchSteamDeckNativeDisplay,
+            m_Preferences->useVirtualDisplay,
+            true,
+            true,
+            m_StreamConfig.width,
+            m_StreamConfig.height,
+            m_StreamConfig.fps,
+            currentMode.w,
+            currentMode.h,
+            refreshHz);
+    if (!resolution.applied) {
+        return false;
+    }
+
+    m_StreamConfig.width = resolution.width;
+    m_StreamConfig.height = resolution.height;
+    m_StreamConfig.fps = resolution.protocolFps;
+    m_StreamConfig.clientRefreshRateX100 =
+        RefreshRateParser::protocolFpsToClientRefreshRateX100(
+            resolution.protocolFps, m_Preferences->fps);
+    return true;
+}
+
 void Session::toggleFullscreen()
 {
     bool fullScreen = !(SDL_GetWindowFlags(m_Window) & m_FullScreenFlag);
@@ -1712,88 +1863,76 @@ void Session::notifyMouseEmulationMode(bool enabled)
 class AsyncConnectionStartThread : public QThread
 {
 public:
-    AsyncConnectionStartThread(Session* session) :
+    AsyncConnectionStartThread(Session* session,
+                               bool resumeOnly = false,
+                               bool announceRetry = false) :
         QThread(nullptr),
-        m_Session(session)
+        m_Session(session),
+        m_ResumeOnly(resumeOnly),
+        m_AnnounceRetry(announceRetry)
     {
         setObjectName("Async Conn Start");
     }
 
     void run() override
     {
-        m_Session->m_AsyncConnectionSuccess = m_Session->startConnectionAsync();
+        m_Session->m_AsyncConnectionSuccess =
+            m_Session->startConnectionAsync(m_ResumeOnly, m_AnnounceRetry);
     }
 
     Session* m_Session;
+    bool m_ResumeOnly;
+    bool m_AnnounceRetry;
 };
 
 // Called in a non-main thread
-bool Session::startConnectionAsync()
+bool Session::startConnectionAsync(bool resumeOnly, bool announceRetry)
 {
-    // Wait 1.5 seconds before connecting to let the user
-    // have time to read any messages present on the segue
-    SDL_Delay(1500);
+    // Reset the resettable cancellation flag at the start of each authorized
+    // attempt. Without this, a previous session that left m_RetryCancellation
+    // set (e.g. StreamSegue cancelRetry() on deactivation after a successful
+    // stream) would silently abort the next one-tap reconnect with a "user
+    // cancelled" outcome. The reset is monotonic within the attempt: any
+    // cancel() that races with us after this point still wins, because we
+    // do not clear cancellation again until the next authorized attempt.
+    m_RetryCancellation.reset();
 
-    // The UI should have ensured the old game was already quit
-    // if we decide to stream a different game.
-    Q_ASSERT(m_Computer->currentGameId == 0 ||
-             m_Computer->currentGameId == m_App.id);
+    if (!resumeOnly) {
+        SDL_Delay(1500);
+        Q_ASSERT(m_Computer->currentGameId == 0 ||
+                 m_Computer->currentGameId == m_App.id);
+    }
 
-    bool enableGameOptimizations;
+    bool hostSupportsResolution = true;
+    bool enableGameOptimizations = m_Preferences->gameOptimizations;
     if (m_Computer->isNvidiaServerSoftware) {
-        // GFE will set all settings to 720p60 if it doesn't recognize
-        // the chosen resolution. Avoid that by disabling SOPS when it
-        // is not streaming a supported resolution.
-        enableGameOptimizations = false;
+        hostSupportsResolution = false;
         for (const NvDisplayMode &mode : m_Computer->displayModes) {
             if (mode.width == m_StreamConfig.width &&
                     mode.height == m_StreamConfig.height) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "Found host supported resolution: %dx%d",
                             mode.width, mode.height);
+                hostSupportsResolution = true;
                 enableGameOptimizations = m_Preferences->gameOptimizations;
                 break;
             }
         }
     }
-    else {
-        // Always send SOPS to Sunshine because we may repurpose the
-        // option to control whether the display mode is adjusted
-        enableGameOptimizations = m_Preferences->gameOptimizations;
-    }
 
-    // Apollo/Vibepollo requires sops=1 to actually resize the host to the
-    // selected virtual display resolution. The helper overrides effectiveSops
-    // without mutating the user's saved gameOptimizations preference.
     const bool useVirtualDisplay = m_Preferences->useVirtualDisplay;
     const bool effectiveSops =
-        VirtualDisplayLaunchPolicy::resolveEffectiveSops(useVirtualDisplay,
-                                                         enableGameOptimizations);
-    if (useVirtualDisplay && !enableGameOptimizations && effectiveSops) {
+        VirtualDisplayLaunchPolicy::resolveEffectiveSops(
+            useVirtualDisplay,
+            m_Computer->isNvidiaServerSoftware,
+            hostSupportsResolution,
+            enableGameOptimizations);
+    if (useVirtualDisplay && effectiveSops && !m_Computer->isNvidiaServerSoftware) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "Virtual display enabled; forcing sops=1 on launch request "
-                    "(user gameOptimizations preference unchanged)");
+                    "Virtual display enabled; forcing sops=1 on host request");
     }
 
     QString rtspSessionUrl;
-
-    try {
-        NvHTTP http(m_Computer);
-        http.startApp(m_Computer->currentGameId != 0 ? "resume" : "launch",
-                      m_Computer->isNvidiaServerSoftware,
-                      m_App.id, m_App.uuid, &m_StreamConfig,
-                      effectiveSops,
-                      m_Preferences->playAudioOnHost,
-                      m_InputHandler->getAttachedGamepadMask(),
-                      !m_Preferences->multiController,
-                      rtspSessionUrl);
-    } catch (const GfeHttpResponseException& e) {
-        emit displayLaunchError(tr("Host returned error: %1").arg(e.toQString()));
-        return false;
-    } catch (const QtNetworkReplyException& e) {
-        emit displayLaunchError(e.toQString());
-        return false;
-    }
 
     QByteArray hostnameStr = m_Computer->activeAddress.address().toLatin1();
     QByteArray siAppVersion = m_Computer->appVersion.toLatin1();
@@ -1873,86 +2012,245 @@ bool Session::startConnectionAsync()
                                                                          false);
     }
 
-    // Cold virtual-display creation on the host can exceed LiStartConnection's
-    // initial readiness window. For virtual display sessions, retry the
-    // connection step (only) a bounded number of times. The /launch (or
-    // /resume) HTTP request above is intentionally NOT reissued; reissuing it
-    // could duplicate or restart Steam on the host.
     const int maxConnectionAttempts =
-        VirtualDisplayLaunchPolicy::maxConnectionAttempts(useVirtualDisplay);
-    int err = 0;
-    bool connectionSucceeded = false;
+        VirtualDisplayLaunchPolicy::maxConnectionAttempts(
+            useVirtualDisplay, m_Computer->isNvidiaServerSoftware);
+    const bool retryingVirtualDisplay = maxConnectionAttempts > 1;
+    m_VirtualDisplayRetrySuppress.store(retryingVirtualDisplay);
 
-    if (useVirtualDisplay && maxConnectionAttempts > 1) {
+    if (retryingVirtualDisplay) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "Virtual display session: enabling bounded connection "
-                    "readiness retry (max %d attempts)",
+                    "Virtual display connection retry enabled (max %d attempts)",
                     maxConnectionAttempts);
-        m_VirtualDisplayRetryInFlight = true;
-        m_VirtualDisplayRetrySuppress = true;
-        m_VirtualDisplayLastStage = -1;
-        m_VirtualDisplayLastErrorCode = 0;
-        m_VirtualDisplayHasPendingFailure = false;
-    }
-
-    for (int attempt = 0; attempt < maxConnectionAttempts; ++attempt) {
-        err = LiStartConnection(&hostInfo, &m_StreamConfig, &k_ConnCallbacks,
-                                &m_VideoCallbacks, &m_AudioCallbacks,
-                                NULL, 0, NULL, 0);
-        if (err == 0) {
-            connectionSucceeded = true;
-            break;
-        }
-
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Connection attempt %d/%d failed (err=%d)",
-                    attempt + 1, maxConnectionAttempts, err);
-
-        if (attempt + 1 >= maxConnectionAttempts) {
-            // No retries left; LiStartConnection already tore down its own
-            // state on err != 0, so nothing more to do here.
-            break;
-        }
-
-        const int delayMs = VirtualDisplayLaunchPolicy::connectionRetryDelayMs(attempt);
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "Retrying connection in %d ms", delayMs);
-        SDL_Delay(static_cast<Uint32>(delayMs));
-    }
-
-    if (m_VirtualDisplayRetryInFlight) {
-        // Stop suppressing UI side effects regardless of success/failure.
-        m_VirtualDisplayRetrySuppress = false;
-        m_VirtualDisplayRetryInFlight = false;
-
-        if (!connectionSucceeded && m_VirtualDisplayHasPendingFailure &&
-                m_VirtualDisplayLastStage >= 0) {
-            // Surface the preserved final failure so the user gets one
-            // actionable error rather than a silenced transient blip.
-            unsigned int portFlags =
-                LiGetPortFlagsFromStage(m_VirtualDisplayLastStage);
-            m_PortTestResults =
-                LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
-
-            char failingPorts[128];
-            LiStringifyPortFlags(portFlags, ", ", failingPorts,
-                                 sizeof(failingPorts));
-            emit stageFailed(
-                QString::fromLocal8Bit(LiGetStageName(m_VirtualDisplayLastStage)),
-                m_VirtualDisplayLastErrorCode,
-                QString(failingPorts));
-            return false;
+        if (announceRetry || !m_ConnectionStarted.load()) {
+            emit stageStarting(QStringLiteral("Preparing virtual display..."));
         }
     }
 
-    if (err != 0) {
-        // Non-virtual or no stashed stage failure: we already displayed an
-        // error dialog (or there is nothing actionable to surface).
+    const VirtualDisplayLaunchPolicy::ConnectionRetryOperations operations = {
+        [this, &rtspSessionUrl, resumeOnly, &effectiveSops]() {
+            try {
+                NvHTTP http(m_Computer);
+                http.startApp(resumeOnly || m_Computer->currentGameId != 0
+                                  ? "resume"
+                                  : "launch",
+                              m_Computer->isNvidiaServerSoftware,
+                              m_App.id,
+                              m_App.uuid,
+                              &m_StreamConfig,
+                              effectiveSops,
+                              m_Preferences->playAudioOnHost,
+                              m_InputHandler->getAttachedGamepadMask(),
+                              !m_Preferences->multiController,
+                              rtspSessionUrl);
+                return true;
+            }
+            catch (const GfeHttpResponseException& e) {
+                emit displayLaunchError(
+                    tr("Host returned error: %1").arg(e.toQString()));
+                return false;
+            }
+            catch (const QtNetworkReplyException& e) {
+                emit displayLaunchError(e.toQString());
+                return false;
+            }
+        },
+        [this, &hostInfo](int attemptIndex) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Virtual display connection attempt %d starting",
+                        attemptIndex + 1);
+            const int returnCode = LiStartConnection(
+                &hostInfo,
+                &m_StreamConfig,
+                &k_ConnCallbacks,
+                &m_VideoCallbacks,
+                &m_AudioCallbacks,
+                nullptr,
+                0,
+                nullptr,
+                0);
+            return returnCode;
+        },
+        nullptr
+    };
+
+    const VirtualDisplayLaunchPolicy::ConnectionRetryCallbacks callbacks = {
+        nullptr,
+        [this]() {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                          "Host launch request failed");
+        },
+        [this](int stage, int errorCode) {
+            emitVirtualDisplayFinalStageFailure(stage, errorCode);
+        },
+        [this, maxConnectionAttempts]() {
+            emitVirtualDisplayGenericFailure(maxConnectionAttempts);
+        },
+        nullptr
+    };
+
+    const bool connected = VirtualDisplayLaunchPolicy::runConnectionAttempts(
+        maxConnectionAttempts,
+        m_ConnectionAttemptState,
+        m_RetryCancellation,
+        operations,
+        callbacks);
+    m_VirtualDisplayRetrySuppress.store(false);
+
+    if (!connected) {
         return false;
     }
 
+    m_ConnectionStarted.store(true);
     emit connectionStarted();
-    return connectionSucceeded;
+    return true;
+}
+
+void Session::emitVirtualDisplayFinalStageFailure(int stage, int errorCode)
+{
+    const unsigned int portFlags = LiGetPortFlagsFromStage(stage);
+    m_PortTestResults = LiTestClientConnectivity(
+        CONN_TEST_SERVER, 443, portFlags);
+
+    char failingPorts[128];
+    LiStringifyPortFlags(
+        portFlags, ", ", failingPorts, sizeof(failingPorts));
+    emit stageFailed(
+        QString::fromLocal8Bit(LiGetStageName(stage)),
+        errorCode,
+        QString(failingPorts));
+}
+
+void Session::emitVirtualDisplayGenericFailure(int maxAttempts)
+{
+    emit displayLaunchError(
+        tr("Unable to connect to the host after %1 attempts. Check that the host is online, the Steam Deck can reach it, and the host's streaming ports are allowed.")
+            .arg(maxAttempts));
+}
+
+void Session::cancelRetry()
+{
+    m_RetryCancellation.cancel();
+}
+
+void Session::markIntentionalDisconnect()
+{
+    // Local quit shortcuts (gamepad Start+Select+L1+R1, Ctrl+Alt+Shift+Q) and
+    // the Quick Menu disconnect/quit buttons all funnel through here. Any
+    // clConnectionTerminated callback that follows must be classified as
+    // intentional so the user does not see a recovery or error dialog for a
+    // quit they issued themselves.
+    m_IntentionalDisconnect.store(true);
+    m_RetryCancellation.cancel();
+}
+
+void Session::requestReconnect()
+{
+    SDL_Event event = {};
+    event.type = SDL_USEREVENT;
+    event.user.code = SDL_CODE_RECONNECT_SESSION;
+    SDL_PushEvent(&event);
+}
+
+void Session::cancelSession()
+{
+    m_IntentionalDisconnect.store(true);
+    m_RetryCancellation.cancel();
+    if (m_ConnectionStarted.load()) {
+        SDL_Event event = {};
+        event.type = SDL_QUIT;
+        event.quit.timestamp = SDL_GetTicks();
+        SDL_PushEvent(&event);
+    }
+}
+
+void Session::reconnectSession()
+{
+    emit reconnectStarted();
+    m_UnexpectedTermination.store(false);
+
+    // A reconnect is by definition a legitimate, user-initiated attempt that
+    // must not be silenced by a leftover intentional-disconnect flag from a
+    // previous quit. Clear it here so a genuine failure during this attempt
+    // still surfaces the recovery dialog.
+    m_IntentionalDisconnect.store(false);
+
+    // Tear down the previous connection's moonlight-common-c state. The
+    // recovery path intentionally skips the SDL_QUIT push that would normally
+    // drive DeferredSessionCleanupTask, so LiStopConnection() has not run yet.
+    // Without it, moonlight-common-c would double-allocate the ENet peer, the
+    // video decoder, and the audio renderer when LiStartConnection() is
+    // called again below.
+    LiStopConnection();
+    m_ConnectionStarted.store(false);
+    m_VirtualDisplayRetrySuppress.store(false);
+    m_RetryCancellation.reset();
+
+    const auto exitAfterReconnectFailure = [this]() {
+        m_UnexpectedTermination.store(true);
+        SDL_Event event = {};
+        event.type = SDL_QUIT;
+        event.quit.timestamp = SDL_GetTicks();
+        SDL_PushEvent(&event);
+    };
+
+    int currentGameId = 0;
+    try {
+        NvHTTP http(m_Computer);
+        currentGameId = NvHTTP::getCurrentGame(
+            http.getServerInfo(NvHTTP::NVLL_ERROR));
+    } catch (const GfeHttpResponseException& e) {
+        emit displayLaunchError(
+            tr("Host returned error while reconnecting: %1").arg(e.toQString()));
+        exitAfterReconnectFailure();
+        return;
+    } catch (const QtNetworkReplyException& e) {
+        emit displayLaunchError(e.toQString());
+        exitAfterReconnectFailure();
+        return;
+    }
+
+    if (!VirtualDisplayLaunchPolicy::canResumeExistingHostSession(
+            m_App.id, currentGameId)) {
+        emit displayLaunchError(
+            tr("The host is no longer running %1. Return to the app list to start it without launching a duplicate session.")
+                .arg(m_App.name));
+        exitAfterReconnectFailure();
+        return;
+    }
+
+    // Run the connection handshake on a worker thread so the main thread can
+    // continue to pump SDL events (the connection callbacks push SDL_USEREVENT
+    // and SDL_QUIT that must be dispatched by us). Calling startConnectionAsync
+    // from the SDL event loop thread would deadlock the callbacks.
+    AsyncConnectionStartThread asyncConnThread(this, true, true);
+    asyncConnThread.start();
+    while (!asyncConnThread.wait(10)) {
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        QCoreApplication::sendPostedEvents();
+    }
+
+    // Pump the event loop one last time to pick up anything the worker posted
+    // in its final frame, mirroring the initial launch path above.
+    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    QCoreApplication::sendPostedEvents();
+
+    m_UnexpectedTermination.store(!m_AsyncConnectionSuccess);
+    if (!m_AsyncConnectionSuccess) {
+        exitAfterReconnectFailure();
+    }
+}
+
+void Session::handleApplicationExit()
+{
+    m_IntentionalDisconnect.store(true);
+    m_RetryCancellation.cancel();
+    if (m_ConnectionStarted.load()) {
+        SDL_Event event = {};
+        event.type = SDL_QUIT;
+        event.quit.timestamp = SDL_GetTicks();
+        SDL_PushEvent(&event);
+    }
 }
 
 void Session::flushWindowEvents()
@@ -1984,6 +2282,8 @@ void Session::sendWifiKeepaliveIfNeeded()
 void Session::setShouldExitAfterQuit()
 {
     m_ShouldExitAfterQuit = true;
+    m_IntentionalDisconnect.store(true);
+    m_RetryCancellation.cancel();
 }
 
 class ExecThread : public QThread
@@ -2289,7 +2589,7 @@ void Session::execInternal()
     // Now that we're about to stream, any SDL_QUIT event is expected
     // unless it comes from the connection termination callback where
     // (m_UnexpectedTermination is set back to true).
-    m_UnexpectedTermination = false;
+    m_UnexpectedTermination.store(false);
 
     // Start rich presence to indicate we're in game
     RichPresenceManager presence(*m_Preferences, m_App.name);
@@ -2374,6 +2674,9 @@ void Session::execInternal()
             case SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS:
                 m_InputHandler->setAdaptiveTriggers((uint16_t)(uintptr_t)event.user.data1,
                                                     (DualSenseOutputReport *)event.user.data2);
+                break;
+            case SDL_CODE_RECONNECT_SESSION:
+                reconnectSession();
                 break;
             default:
                 SDL_assert(false);

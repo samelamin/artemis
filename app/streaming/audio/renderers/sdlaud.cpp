@@ -1,6 +1,23 @@
 #include "sdl.h"
 
 #include <Limelight.h>
+#include "streaming/virtualdisplaylaunch.h"
+
+namespace {
+
+// PipeWire/PulseAudio default sinks can take a moment to publish after the
+// user's session comes up. A short bounded retry keeps the first stream of
+// the session from failing with "Failed to open audio device". Six attempts
+// at 100ms caps the total wait at ~500ms; failure still feels immediate.
+constexpr int kAudioOpenAttempts = 6;
+constexpr int kAudioOpenDelayMs = 100;
+
+const char* audioDriverName()
+{
+    return SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "<unknown>";
+}
+
+}
 
 SdlAudioRenderer::SdlAudioRenderer()
     : m_AudioDevice(0),
@@ -10,9 +27,10 @@ SdlAudioRenderer::SdlAudioRenderer()
 
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "SDL_InitSubSystem(SDL_INIT_AUDIO) failed: %s",
+                     "SDL_InitSubSystem(SDL_INIT_AUDIO) failed (driver=%s): %s",
+                     audioDriverName(),
                      SDL_GetError());
-        SDL_assert(SDL_WasInit(SDL_INIT_AUDIO));
+        return;
     }
 }
 
@@ -44,12 +62,35 @@ bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* 
                   opusConfig->channelCount *
                   getAudioBufferSampleSize();
 
-    m_AudioDevice = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+    if (!SDL_WasInit(SDL_INIT_AUDIO)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "SDL audio subsystem was not initialized; cannot open device");
+        return false;
+    }
+
+    const int attempt = VirtualDisplayLaunchPolicy::retryWithFixedDelay(
+        kAudioOpenAttempts,
+        [this, &want, &have](int) {
+            m_AudioDevice = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+            return m_AudioDevice != 0;
+        },
+        []() { SDL_Delay(static_cast<Uint32>(kAudioOpenDelayMs)); });
+
     if (m_AudioDevice == 0) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "Failed to open audio device: %s",
-                     SDL_GetError());
+                     "Failed to open audio device after %d attempts via driver %s. "
+                     "The host's default sink may not be ready yet; try restarting "
+                     "the stream or selecting a different audio output.",
+                     kAudioOpenAttempts,
+                     audioDriverName());
         return false;
+    }
+
+    if (attempt > 1) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "SDL_OpenAudioDevice succeeded on attempt %d via driver %s",
+                    attempt,
+                    audioDriverName());
     }
 
     m_AudioBuffer = SDL_malloc(m_FrameSize);
@@ -71,7 +112,7 @@ bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* 
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "SDL audio driver: %s",
-                SDL_GetCurrentAudioDriver());
+                audioDriverName());
 
     // Start playback
     SDL_PauseAudioDevice(m_AudioDevice, 0);

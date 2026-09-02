@@ -8,6 +8,7 @@
 
 #include "streaming/session.h"
 #include "streaming/streamutils.h"
+#include "backend/steamdecksession.h"
 
 #ifdef Q_OS_WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -16,6 +17,9 @@
 
 SystemProperties::SystemProperties()
 {
+    isSteamDeck = SteamDeckSession::isSteamDeck();
+    steamDeckGamingMode = isSteamDeck &&
+                          SteamDeckSession::current() == SteamDeckSession::Gaming;
     versionString = QString(VERSION_STR);
     hasDesktopEnvironment = WMUtils::isRunningDesktopEnvironment();
     isRunningWayland = WMUtils::isRunningWayland();
@@ -78,6 +82,11 @@ SystemProperties::SystemProperties()
     Q_ASSERT(!monitorRefreshRates.isEmpty());
     Q_ASSERT(!monitorNativeResolutions.isEmpty());
     Q_ASSERT(!monitorSafeAreaResolutions.isEmpty());
+}
+
+bool SystemProperties::isSteamDeckOrGamescope()
+{
+    return SteamDeckSession::current() != SteamDeckSession::Unknown;
 }
 
 QRect SystemProperties::getNativeResolution(int displayIndex)
