@@ -1,5 +1,8 @@
 #include <QtTest>
 
+#include <QProcessEnvironment>
+#include <QTemporaryFile>
+
 #include "backend/steamdecksession.h"
 #include "settings/refreshrateparser.h"
 #include "streaming/virtualdisplaylaunch.h"
@@ -16,7 +19,8 @@ private slots:
     void maxConnectionAttemptsIsBoundedOnlyForNonNvidiaVirtualDisplay();
     void deckNativeDisplayPolicy_data();
     void deckNativeDisplayPolicy();
-    void steamDeckIdentityDoesNotInferHardwareFromRefreshRate();
+    void steamDeckIdentityRecognizesLcdAndOledBoards();
+    void steamDeckModelClassifiesLcdAndOled();
     void explicitHdrPolicyRequiresHostAndClient10Bit();
     void retryLaunchesOnceAndUsesAllAttempts();
     void retryLaunchFailureProducesOneFinalCallback();
@@ -40,6 +44,7 @@ private slots:
     void cancellationLifecycleCoversInitialAttemptReconnectAndUserCancel();
     void connectionAttemptStateResetClearsAllSignals();
     void reconnectClassificationIgnoresLeftoverIntentionalAndStartedFlags();
+    void gamescopeWsiEnablesOnlyInGamescopeSessionWithLayerPresent();
 };
 
 void VirtualDisplayLaunchTest::resolveEffectiveSopsForcesNonNvidiaVirtualDisplay()
@@ -140,18 +145,84 @@ void VirtualDisplayLaunchTest::deckNativeDisplayPolicy()
     QCOMPARE(result.protocolFps, expectedProtocolFps);
 }
 
-void VirtualDisplayLaunchTest::steamDeckIdentityDoesNotInferHardwareFromRefreshRate()
+void VirtualDisplayLaunchTest::steamDeckIdentityRecognizesLcdAndOledBoards()
 {
     QVERIFY(SteamDeckSession::isSteamDeckIdentity(
         "Jupiter", "Valve Corporation", "Jupiter"));
     QVERIFY(SteamDeckSession::isSteamDeckIdentity(
         "Aerith", "Valve Corporation", "Aerith"));
-    QVERIFY(!SteamDeckSession::isSteamDeckIdentity(
+    QVERIFY(SteamDeckSession::isSteamDeckIdentity(
         "Galileo", "Valve Corporation", "Galileo"));
-    QVERIFY(!SteamDeckSession::isSteamDeckIdentity(
+    QVERIFY(SteamDeckSession::isSteamDeckIdentity(
         "Custom PC", "Valve Corporation", "Galileo"));
     QVERIFY(!SteamDeckSession::isSteamDeckIdentity(
         "90 Hz Panel", "Example Vendor", "Jupiter"));
+}
+
+void VirtualDisplayLaunchTest::steamDeckModelClassifiesLcdAndOled()
+{
+    QCOMPARE(SteamDeckSession::modelFromIdentity(
+        "Jupiter", "Valve Corporation", "Jupiter"), SteamDeckSession::LCD);
+    QCOMPARE(SteamDeckSession::modelFromIdentity(
+        "Aerith", "Valve Corporation", "Aerith"), SteamDeckSession::LCD);
+    QCOMPARE(SteamDeckSession::modelFromIdentity(
+        "Galileo", "Valve Corporation", "Galileo"), SteamDeckSession::OLED);
+    QCOMPARE(SteamDeckSession::modelFromIdentity(
+        "Jupiter", "Example Vendor", "Jupiter"), SteamDeckSession::NotSteamDeck);
+    QCOMPARE(SteamDeckSession::modelFromIdentity(
+        "Custom PC", "Valve Corporation", "Galileo"), SteamDeckSession::OLED);
+    QCOMPARE(SteamDeckSession::modelFromIdentity(
+        "Jupiter", "Valve Corporation", ""), SteamDeckSession::LCD);
+
+    // Generic "Steam Deck" product name with no board info: identity is true
+    // but no exact codename matches, so the fallback must classify as LCD.
+    QCOMPARE(SteamDeckSession::modelFromIdentity(
+        "Steam Deck", "Valve Corporation", ""), SteamDeckSession::LCD);
+
+    // Known LCD product name with an unrecognised board name: product match
+    // wins, so model is LCD.
+    QCOMPARE(SteamDeckSession::modelFromIdentity(
+        "Jupiter", "Valve Corporation", "SomeUnknownBoard"), SteamDeckSession::LCD);
+
+    // Parity loop: every triple used by steamDeckIdentityRecognizesLcdAndOledBoards()
+    // (plus the two new fall-through cases) must agree that "is a Steam Deck"
+    // and "modelFromIdentity != NotSteamDeck" are the same predicate. Any
+    // future divergence between the two functions will be caught here with a
+    // triple-named failure message.
+    struct IdentityTriple {
+        const char *product;
+        const char *vendor;
+        const char *board;
+    };
+    const IdentityTriple triples[] = {
+        {"Jupiter",          "Valve Corporation", "Jupiter"},
+        {"Aerith",           "Valve Corporation", "Aerith"},
+        {"Galileo",          "Valve Corporation", "Galileo"},
+        {"Custom PC",        "Valve Corporation", "Galileo"},
+        {"90 Hz Panel",      "Example Vendor",    "Jupiter"},
+        {"Steam Deck",       "Valve Corporation", ""},
+        {"Jupiter",          "Valve Corporation", "SomeUnknownBoard"},
+    };
+    for (const IdentityTriple &triple : triples) {
+        const bool recognizedIdentity =
+            SteamDeckSession::isSteamDeckIdentity(
+                QString::fromLatin1(triple.product),
+                QString::fromLatin1(triple.vendor),
+                QString::fromLatin1(triple.board));
+        const bool classifiedAsDeck =
+            SteamDeckSession::modelFromIdentity(
+                QString::fromLatin1(triple.product),
+                QString::fromLatin1(triple.vendor),
+                QString::fromLatin1(triple.board))
+            != SteamDeckSession::NotSteamDeck;
+        QVERIFY2(recognizedIdentity == classifiedAsDeck,
+                 qPrintable(QStringLiteral(
+                     "modelFromIdentity parity diverged from isSteamDeckIdentity for "
+                     "product='%1' vendor='%2' board='%3'")
+                     .arg(QString::fromLatin1(triple.product))
+                     .arg(QString::fromLatin1(triple.vendor))
+                     .arg(QString::fromLatin1(triple.board))));
+    }
 }
 
 void VirtualDisplayLaunchTest::explicitHdrPolicyRequiresHostAndClient10Bit()
@@ -750,6 +821,48 @@ void VirtualDisplayLaunchTest::reconnectClassificationIgnoresLeftoverIntentional
     // a leftover intentional flag.
     QVERIFY(VirtualDisplayLaunchPolicy::shouldSurfaceRecovery(-100, false, true));
     QVERIFY(!VirtualDisplayLaunchPolicy::shouldSurfaceRecovery(-100, true, true));
+}
+
+void VirtualDisplayLaunchTest::gamescopeWsiEnablesOnlyInGamescopeSessionWithLayerPresent()
+{
+    QTemporaryFile layerFile;
+    QVERIFY(layerFile.open());
+    const QString existingPath = layerFile.fileName();
+    const QString missingPath = existingPath + QLatin1String(".does.not.exist");
+
+    {
+        QProcessEnvironment gamescopeEnv;
+        gamescopeEnv.insert(QStringLiteral("GAMESCOPE_WAYLAND_DISPLAY"), QStringLiteral("wayland-0"));
+        QVERIFY(SteamDeckSession::shouldEnableGamescopeWsi(gamescopeEnv, existingPath));
+    }
+
+    {
+        QProcessEnvironment gamescopeEnv;
+        gamescopeEnv.insert(QStringLiteral("GAMESCOPE_WAYLAND_DISPLAY"), QStringLiteral("wayland-0"));
+        QVERIFY(!SteamDeckSession::shouldEnableGamescopeWsi(gamescopeEnv, missingPath));
+    }
+
+    {
+        QProcessEnvironment kdeEnv;
+        kdeEnv.insert(QStringLiteral("XDG_CURRENT_DESKTOP"), QStringLiteral("KDE"));
+        kdeEnv.insert(QStringLiteral("KDE_FULL_SESSION"), QStringLiteral("true"));
+        kdeEnv.insert(QStringLiteral("XDG_SESSION_TYPE"), QStringLiteral("wayland"));
+        QVERIFY(!SteamDeckSession::shouldEnableGamescopeWsi(kdeEnv, existingPath));
+    }
+
+    {
+        QProcessEnvironment gamescopeEnv;
+        gamescopeEnv.insert(QStringLiteral("GAMESCOPE_WAYLAND_DISPLAY"), QStringLiteral("wayland-0"));
+        gamescopeEnv.insert(QStringLiteral("ENABLE_GAMESCOPE_WSI"), QStringLiteral("0"));
+        QVERIFY(!SteamDeckSession::shouldEnableGamescopeWsi(gamescopeEnv, existingPath));
+    }
+
+    {
+        QProcessEnvironment gamescopeEnv;
+        gamescopeEnv.insert(QStringLiteral("GAMESCOPE_WAYLAND_DISPLAY"), QStringLiteral("wayland-0"));
+        gamescopeEnv.insert(QStringLiteral("DISABLE_GAMESCOPE_WSI"), QStringLiteral("1"));
+        QVERIFY(!SteamDeckSession::shouldEnableGamescopeWsi(gamescopeEnv, existingPath));
+    }
 }
 
 QTEST_GUILESS_MAIN(VirtualDisplayLaunchTest)

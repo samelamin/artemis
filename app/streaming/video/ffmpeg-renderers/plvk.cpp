@@ -428,6 +428,7 @@ bool PlVkRenderer::isExtensionSupportedByPhysicalDevice(VkPhysicalDevice device,
 bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
 {
     m_Window = params->window;
+    m_VideoFormat = params->videoFormat;
 
     unsigned int instanceExtensionCount = 0;
     if (!SDL_Vulkan_GetInstanceExtensions(params->window, &instanceExtensionCount, nullptr)) {
@@ -485,8 +486,22 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
     //
     // For HDR streaming, we try to find an HDR-capable Vulkan device first then
     // try another search without the HDR requirement if the first attempt fails.
-    if (!chooseVulkanDevice(params, params->videoFormat & VIDEO_FORMAT_MASK_10BIT) &&
-        (!(params->videoFormat & VIDEO_FORMAT_MASK_10BIT) || !chooseVulkanDevice(params, false))) {
+    if (params->videoFormat & VIDEO_FORMAT_MASK_10BIT) {
+        if (chooseVulkanDevice(params, true)) {
+            m_HdrOutputAvailable = true;
+        }
+        else if (!chooseVulkanDevice(params, false)) {
+            return false;
+        }
+        else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "PlVkRenderer: No Vulkan device advertises HDR10 (ST.2084 PQ) output. "
+                        "The HDR stream will be tone-mapped to SDR. On Steam Deck OLED, enable HDR "
+                        "under Settings > Display and relaunch in Gaming Mode so the gamescope WSI "
+                        "layer can expose HDR10.");
+        }
+    }
+    else if (!chooseVulkanDevice(params, false)) {
         return false;
     }
 
@@ -630,10 +645,23 @@ bool PlVkRenderer::mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFra
         mappedFrame->color.hdr.min_luma = PL_COLOR_HDR_BLACK;
     }
 
-    // HACK: AMF AV1 encoding on the host PC does not set full color range properly in the
-    // bitstream data, so libplacebo incorrectly renders the content as limited range.
-    //
-    // As a workaround, set full range manually in the mapped frame ourselves.
+    // We always request full color range via getDecoderColorRange(), but
+    // some host encoders (notably AMF AV1) mislabel full-range frames as
+    // AVCOL_RANGE_MPEG in the bitstream, which would otherwise cause
+    // libplacebo to map them as limited range and crush blacks. Override
+    // unconditionally; the one-shot diagnostic below exists to make a
+    // genuinely limited-range host diagnosable from the log instead.
+    if (frame->color_range == AVCOL_RANGE_MPEG && !m_ColorRangeMismatchWarned) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "PlVkRenderer: host signaled limited color range (AVCOL_RANGE_MPEG) "
+                    "while the client requested full range (video format 0x%x). "
+                    "Overriding to full range because some host encoders (notably AMF AV1) "
+                    "mislabel full-range bitstreams. A genuinely limited-range host would "
+                    "show crushed blacks — please report this with logs so the unconditional "
+                    "override can be revisited.",
+                    m_VideoFormat);
+        m_ColorRangeMismatchWarned = true;
+    }
     mappedFrame->repr.levels = PL_COLOR_LEVELS_FULL;
 
     return true;
@@ -1228,7 +1256,16 @@ void PlVkRenderer::setHdrMode(bool enabled)
     if (m_HdrModeEnabled == enabled) {
         return; // No change needed
     }
-    
+
+    if (enabled && !m_HdrOutputAvailable && !m_HdrDegradationWarned) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "PlVkRenderer: No Vulkan device advertises HDR10 (ST.2084 PQ) output. "
+                    "The HDR stream will be tone-mapped to SDR. On Steam Deck OLED, enable HDR "
+                    "under Settings > Display and relaunch in Gaming Mode so the gamescope WSI "
+                    "layer can expose HDR10.");
+        m_HdrDegradationWarned = true;
+    }
+
     m_HdrModeEnabled = enabled;
     
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,

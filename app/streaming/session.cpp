@@ -482,13 +482,41 @@ void Session::getDecoderInfo(SDL_Window* window,
 {
     IVideoDecoder* decoder;
 
+    // This function only feeds the settings-UI capability flags; a more
+    // permissive startup probe cannot cause a silent stream failure at
+    // connect time because Session::initialize() re-probes via
+    // getDecoderAvailability() at the real m_StreamConfig geometry and
+    // getActualFpsForDecoderTest().
+    //
+    // Probe FPS is held at 60 (output refresh rate is not a decoder
+    // capability). Probe resolution is capped at the 1920x1080 baseline so
+    // a 4K display doesn't newly advertise codecs the machine cannot
+    // sustain, and on a 1280x800 Steam Deck panel it shrinks to native —
+    // which is the actual fix, since Van Gogh (RDNA2 VCN3) AV1 decode is
+    // marginal at 1080p and was making AV1/HDR report as unsupported.
+    int probeWidth = 1920;
+    int probeHeight = 1080;
+    int probeFps = 60;
+    if (window != nullptr) {
+        SDL_DisplayMode desktopMode;
+        const int displayIndex = SDL_GetWindowDisplayIndex(window);
+        if (SDL_GetDesktopDisplayMode(displayIndex, &desktopMode) == 0 &&
+                desktopMode.w > 0 && desktopMode.h > 0) {
+            probeWidth = qMin(desktopMode.w, 1920);
+            probeHeight = qMin(desktopMode.h, 1080);
+        }
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Probing decoders at %dx%d %dfps",
+                probeWidth, probeHeight, probeFps);
+
     // Since AV1 support on the host side is in its infancy, let's not consider
     // _only_ a working AV1 decoder to be acceptable and still show the warning
     // dialog indicating lack of hardware decoding support.
 
     // Try an HEVC Main10 decoder first to see if we have HDR support
     if (chooseDecoder(StreamingPreferences::VDS_FORCE_HARDWARE,
-                      window, VIDEO_FORMAT_H265_MAIN10, 1920, 1080, 60,
+                      window, VIDEO_FORMAT_H265_MAIN10, probeWidth, probeHeight, probeFps,
                       false, false, true, decoder)) {
         isHardwareAccelerated = decoder->isHardwareAccelerated();
         isFullScreenOnly = decoder->isAlwaysFullScreen();
@@ -501,7 +529,7 @@ void Session::getDecoderInfo(SDL_Window* window,
 
     // Try an AV1 Main10 decoder next to see if we have HDR support
     if (chooseDecoder(StreamingPreferences::VDS_FORCE_HARDWARE,
-                      window, VIDEO_FORMAT_AV1_MAIN10, 1920, 1080, 60,
+                      window, VIDEO_FORMAT_AV1_MAIN10, probeWidth, probeHeight, probeFps,
                       false, false, true, decoder)) {
         // If we've got a working AV1 Main 10-bit decoder, we'll enable the HDR checkbox
         // but we will still continue probing to get other attributes for HEVC or H.264
@@ -513,10 +541,10 @@ void Session::getDecoderInfo(SDL_Window* window,
         // If we found no hardware decoders with HDR, check for a renderer
         // that supports HDR rendering with software decoded frames.
         if (chooseDecoder(StreamingPreferences::VDS_FORCE_SOFTWARE,
-                          window, VIDEO_FORMAT_H265_MAIN10, 1920, 1080, 60,
+                          window, VIDEO_FORMAT_H265_MAIN10, probeWidth, probeHeight, probeFps,
                           false, false, true, decoder) ||
             chooseDecoder(StreamingPreferences::VDS_FORCE_SOFTWARE,
-                          window, VIDEO_FORMAT_AV1_MAIN10, 1920, 1080, 60,
+                          window, VIDEO_FORMAT_AV1_MAIN10, probeWidth, probeHeight, probeFps,
                           false, false, true, decoder)) {
             isHdrSupported = decoder->isHdrSupported();
             delete decoder;
@@ -530,7 +558,7 @@ void Session::getDecoderInfo(SDL_Window* window,
         // Try AV1 Main8 as fallback to check for general AV1 hardware support
         // This allows AV1 to work even if 10-bit/HDR is not supported
         if (chooseDecoder(StreamingPreferences::VDS_FORCE_HARDWARE,
-                          window, VIDEO_FORMAT_AV1_MAIN8, 1920, 1080, 60,
+                          window, VIDEO_FORMAT_AV1_MAIN8, probeWidth, probeHeight, probeFps,
                           false, false, true, decoder)) {
             delete decoder;
         }
@@ -538,7 +566,7 @@ void Session::getDecoderInfo(SDL_Window* window,
 
     // Try a regular hardware accelerated HEVC decoder now
     if (chooseDecoder(StreamingPreferences::VDS_FORCE_HARDWARE,
-                      window, VIDEO_FORMAT_H265, 1920, 1080, 60,
+                      window, VIDEO_FORMAT_H265, probeWidth, probeHeight, probeFps,
                       false, false, true, decoder)) {
         isHardwareAccelerated = decoder->isHardwareAccelerated();
         isFullScreenOnly = decoder->isAlwaysFullScreen();
@@ -551,7 +579,7 @@ void Session::getDecoderInfo(SDL_Window* window,
 
 #if 0 // See AV1 comment at the top of this function
     if (chooseDecoder(StreamingPreferences::VDS_FORCE_HARDWARE,
-                      window, VIDEO_FORMAT_AV1_MAIN8, 1920, 1080, 60,
+                      window, VIDEO_FORMAT_AV1_MAIN8, probeWidth, probeHeight, probeFps,
                       false, false, true, decoder)) {
         isHardwareAccelerated = decoder->isHardwareAccelerated();
         isFullScreenOnly = decoder->isAlwaysFullScreen();
@@ -565,7 +593,7 @@ void Session::getDecoderInfo(SDL_Window* window,
     // If we still didn't find a hardware decoder, try H.264 now.
     // This will fall back to software decoding, so it should always work.
     if (chooseDecoder(StreamingPreferences::VDS_AUTO,
-                      window, VIDEO_FORMAT_H264, 1920, 1080, 60,
+                      window, VIDEO_FORMAT_H264, probeWidth, probeHeight, probeFps,
                       false, false, true, decoder)) {
         isHardwareAccelerated = decoder->isHardwareAccelerated();
         isFullScreenOnly = decoder->isAlwaysFullScreen();

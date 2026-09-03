@@ -56,7 +56,16 @@ normally does not need to be added again.
 Valve specifies a 1280x800 panel capped at 60 Hz for Steam Deck LCD and a
 1280x800 HDR panel up to 90 Hz for Steam Deck OLED ([specifications][deck-specs],
 [support note][deck-refresh]). Use these as starting points, not evidence that a
-particular stream path has passed:
+particular stream path has passed.
+
+Steam Deck OLED units report DMI `product_name` and `board_name` as `Galileo`,
+and Vibertemis recognizes that identifier alongside the LCD board names
+(`Jupiter`, `Aerith`) when classifying host hardware as a Steam Deck. The OLED
+versus LCD split is then used for downstream behavior such as the virtual
+display launch gate and HDR defaults. HDR is enabled by default only for OLED
+hardware in Gaming Mode (the only combination where the connected display is
+typically HDR-capable); a saved HDR preference always wins over the default,
+and Desktop Mode SDR remains the safe baseline regardless of model.
 
 | Use case | SteamOS display mode | Vibertemis stream request | Host target |
 | --- | --- | --- | --- |
@@ -248,6 +257,13 @@ prove that the host can encode the codec. Confirm the selected codec in the
 statistics overlay and confirm lines such as `Using Vulkan video decoding` or a
 selected VAAPI path in the Vibertemis log before recording a hardware result.
 
+At session start, each codec's decoder is probed at the active panel geometry
+(clamped to at most 1920x1080) at 60 FPS, instead of a fixed 1920x1080@60
+triple. On a Steam Deck panel this probes 1280x800@60, so a decoder that works
+at native resolution is no longer rejected because it marginal-failed a 1080p60
+probe. The startup probe only feeds settings-UI capability flags; per-session
+availability is re-checked against the real stream geometry before use.
+
 If a stream fails to start, shows corruption, or falls back to slow software
 decoding, retest in this order: SDR, Auto codec/decoder, H.264, 1280x720 at 30
 FPS, and a lower bitrate. Change one item at a time.
@@ -257,11 +273,25 @@ FPS, and a lower bitrate. Change one item at a time.
 Only mark OLED HDR as passed when the complete path is HDR-capable:
 
 - Steam Deck OLED, or an HDR-capable external display;
-- Gaming Mode/Gamescope with HDR enabled for the Vibertemis shortcut;
+- Gaming Mode/Gamescope with HDR enabled for the Vibertemis shortcut, AND HDR
+  enabled for the Deck itself under SteamOS **Settings > Display**;
+- the gamescope Vulkan WSI layer (`libVkLayer_FROG_gamescope_wsi_x86_64.so`)
+  enabled automatically by Vibertemis only inside a gamescope session when the
+  host layer library is actually present; Vibertemis never force-loads the layer
+  in Desktop Mode, plain KDE, or non-SteamOS hosts, and never overrides an
+  explicit `ENABLE_GAMESCOPE_WSI` / `DISABLE_GAMESCOPE_WSI` value already set by
+  Steam or the user;
 - an HDR-capable host display or EDID/virtual display;
 - host HEVC Main10 or AV1 Main10 encoding support;
 - a usable 10-bit client decode and Vulkan presentation path; and
 - matching host/client resolution to avoid scaling artifacts.
+
+When the chosen Vulkan device does not advertise an HDR10 (ST.2084 PQ) output,
+the HDR stream is tone-mapped to SDR and the client log contains a single
+warning that names the missing HDR10 device and the Deck remedy (enabling HDR
+under Settings > Display and relaunching in Gaming Mode so the gamescope WSI
+layer can expose HDR10). The user-visible HDR setting is not silently disabled;
+that log line is the diagnostic that an SDR fallback is in effect.
 
 Moonlight's [HDR requirements][moonlight-setup] describe the host display/EDID,
 Main10, and resolution-matching requirements. Moonlight's Linux/Steam Deck HDR

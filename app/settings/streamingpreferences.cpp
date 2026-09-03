@@ -1,5 +1,6 @@
 #include "streamingpreferences.h"
 #include "utils.h"
+#include "backend/steamdecksession.h"
 
 #include <QSettings>
 #include <QTranslator>
@@ -156,7 +157,19 @@ void StreamingPreferences::reload()
     reverseScrollDirection = settings.value(SER_REVERSESCROLL, false).toBool();
     swapFaceButtons = settings.value(SER_SWAPFACEBUTTONS, false).toBool();
     keepAwake = settings.value(SER_KEEPAWAKE, true).toBool();
-    enableHdr = settings.value(SER_HDR, false).toBool();
+    if (settings.contains(SER_HDR)) {
+        enableHdr = settings.value(SER_HDR, false).toBool();
+    }
+    else {
+        // Default HDR on only for Steam Deck OLED in Gaming Mode. Hardware
+        // identity alone also enables HDR in the KDE desktop session, where
+        // the compositor drives the panel as SDR and the HDR-on default
+        // would just be a configuration error. A saved value still wins,
+        // and the VCC_FORCE_HEVC_HDR_DEPRECATED migration further down
+        // can still force enableHdr = true on top of this default.
+        enableHdr = SteamDeckSession::model() == SteamDeckSession::OLED &&
+                    SteamDeckSession::current() == SteamDeckSession::Gaming;
+    }
     captureSysKeysMode = static_cast<CaptureSysKeysMode>(settings.value(SER_CAPTURESYSKEYS,
                                                          static_cast<int>(CaptureSysKeysMode::CSK_OFF)).toInt());
     audioConfig = static_cast<AudioConfig>(settings.value(SER_AUDIOCFG,

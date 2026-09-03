@@ -1871,7 +1871,7 @@ Flickable {
                 CheckBox {
                     id: enableHdr
                     width: parent.width
-                    text: qsTr("Enable HDR (Experimental)")
+                    text: qsTr("Enable HDR")
                     font.pointSize: 12
 
                     enabled: SystemProperties.supportsHdr

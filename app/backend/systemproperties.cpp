@@ -18,6 +18,8 @@
 SystemProperties::SystemProperties()
 {
     isSteamDeck = SteamDeckSession::isSteamDeck();
+    isSteamDeckOled = isSteamDeck &&
+                      SteamDeckSession::model() == SteamDeckSession::OLED;
     steamDeckGamingMode = isSteamDeck &&
                           SteamDeckSession::current() == SteamDeckSession::Gaming;
     versionString = QString(VERSION_STR);

@@ -30,6 +30,7 @@ public:
     virtual bool isPixelFormatSupported(int videoFormat, enum AVPixelFormat pixelFormat) override;
     virtual AVPixelFormat getPreferredPixelFormat(int videoFormat) override;
     virtual void setHdrMode(bool enabled) override;
+    bool isHdrOutputAvailable() const { return m_HdrOutputAvailable; }
 
 private:
     static void lockQueue(AVHWDeviceContext *dev_ctx, uint32_t queue_family, uint32_t index);
@@ -63,6 +64,10 @@ private:
     pl_tex m_Textures[PL_MAX_PLANES] = {};
     pl_color_space m_LastColorspace = {};
     bool m_HdrModeEnabled = false;
+    bool m_HdrOutputAvailable = false;
+    bool m_HdrDegradationWarned = false;
+    bool m_ColorRangeMismatchWarned = false;
+    int m_VideoFormat = 0;
 
     // Pending swapchain state shared between waitToRender(), renderFrame(), and cleanupRenderContext()
     pl_swapchain_frame m_SwapchainFrame = {};

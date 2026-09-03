@@ -56,6 +56,7 @@
 #include "backend/clipboardmanager.h"
 #include "backend/servercommandmanager.h"
 #include "backend/quickmenumanager.h"
+#include "backend/steamdecksession.h"
 
 #if defined(Q_OS_WIN32)
 #define IS_UNSPECIFIED_HANDLE(x) ((x) == INVALID_HANDLE_VALUE || (x) == NULL)
@@ -450,6 +451,13 @@ int main(int argc, char *argv[])
     // QtNetwork will pull it in via dlopen().
     SSL_free(nullptr);
 #endif
+
+    // Enable the gamescope Vulkan WSI layer only when we are inside a gamescope
+    // session and the host layer library is present. Must run before any
+    // SDL_SetHint / SDL_InitSubSystem call and before QGuiApplication is
+    // constructed, because building Qt's platform plugin can touch Vulkan and
+    // snapshot the loader's layer environment.
+    SteamDeckSession::enableGamescopeWsiIfAvailable();
 
     // We keep this at function scope to ensure it stays around while we're running,
     // becaue the Qt QPA will need to read it. Since the temporary file is only
