@@ -88,7 +88,7 @@ void ServerCommandManager::refreshCommands()
     bool oldPermission = m_hasPermission;
     
     qDebug() << "ServerCommandManager::refreshCommands: Starting refresh";
-    qDebug() << "ServerCommandManager::refreshCommands: Server commands from computer:" << m_computer->serverCommands;
+    qDebug() << "ServerCommandManager::refreshCommands: Server commands from computer";
     
     // Check if server commands are available from serverinfo XML (Android approach)
     if (!m_computer->serverCommands.isEmpty()) {
@@ -105,7 +105,7 @@ void ServerCommandManager::refreshCommands()
             m_commandDescriptions[cmd] = "Server command: " + cmd;
         }
         
-        qDebug() << "ServerCommandManager::refreshCommands: Loaded commands from serverinfo:" << m_availableCommands;
+        qDebug() << "ServerCommandManager::refreshCommands: Loaded commands from serverinfo";
     } else {
         qDebug() << "ServerCommandManager::refreshCommands: No server commands in serverinfo XML, trying separate endpoint";
         
@@ -125,7 +125,7 @@ void ServerCommandManager::refreshCommands()
                 m_commandDescriptions[cmd.id] = cmd.description;
             }
             
-            qDebug() << "ServerCommandManager::refreshCommands: Apollo server detected, using builtin commands:" << m_availableCommands;
+            qDebug() << "ServerCommandManager::refreshCommands: Apollo server detected, using builtin commands";
         } else {
             m_hasPermission = false;
             m_availableCommands.clear();
@@ -266,7 +266,6 @@ void ServerCommandManager::fetchAvailableCommands()
             QByteArray responseData = response.toUtf8();
             
             qDebug() << "ServerCommandManager::fetchAvailableCommands: Received response from" << endpoint << "(" << responseData.size() << "bytes)";
-            qDebug() << "ServerCommandManager::fetchAvailableCommands: Response content:" << responseData;
             
             // Try to parse the response as XML
             if (parseServerCommandsXml(responseData)) {
@@ -389,9 +388,9 @@ void ServerCommandManager::sendCommandExecution(const QString &commandId)
     if (serverCommands.isEmpty()) {
         // Fall back to using our available commands list
         serverCommands = m_availableCommands;
-        qDebug() << "ServerCommandManager: Using builtin commands as fallback:" << serverCommands;
+        qDebug() << "ServerCommandManager: Using builtin commands as fallback";
     } else {
-        qDebug() << "ServerCommandManager: Using server-provided commands:" << serverCommands;
+        qDebug() << "ServerCommandManager: Using server-provided commands";
     }
     
     if (serverCommands.isEmpty()) {
@@ -403,7 +402,7 @@ void ServerCommandManager::sendCommandExecution(const QString &commandId)
         return;
     }
 
-    qDebug() << "ServerCommandManager: Available server commands:" << serverCommands;
+    qDebug() << "ServerCommandManager: Available server commands";
 
     // Find the command in the server's command list
     int cmdId = -1;
@@ -416,7 +415,7 @@ void ServerCommandManager::sendCommandExecution(const QString &commandId)
 
     if (cmdId == -1) {
         qWarning() << "ServerCommandManager: Command not found in server commands:" << commandId;
-        qWarning() << "ServerCommandManager: Available commands:" << serverCommands;
+        qWarning() << "ServerCommandManager: Available commands";
         m_isExecuting = false;
         m_currentExecutingCommand.clear();
         emit executionStateChanged();
@@ -563,7 +562,7 @@ bool ServerCommandManager::sendHttpServerCommand(const QString &commandId)
                                                          10000, // 10 second timeout
                                                          NvHTTP::NVLL_VERBOSE);
         
-        qDebug() << "ServerCommandManager::sendHttpServerCommand: Received response:" << response;
+        qDebug() << "ServerCommandManager::sendHttpServerCommand: Received response";
         
         // Parse the response to check for success
         // Apollo server typically returns JSON or XML responses

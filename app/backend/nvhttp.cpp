@@ -150,7 +150,7 @@ NvHTTP::getServerInfo(NvLogLevel logLevel, bool fastFail)
                                             logLevel);
         // Only log response if not suppressing output (polling requests use NVLL_NONE)
         if (logLevel != NvLogLevel::NVLL_NONE) {
-            qInfo() << "getServerInfo HTTPS response:" << serverInfo;
+            qInfo() << "getServerInfo HTTPS response received";
         }
         verifyResponseStatus(serverInfo);
     }
@@ -164,7 +164,7 @@ NvHTTP::getServerInfo(NvLogLevel logLevel, bool fastFail)
                                             logLevel);
         // Only log response if not suppressing output (polling requests use NVLL_NONE)
         if (logLevel != NvLogLevel::NVLL_NONE) {
-            qInfo() << "getServerInfo response:" << serverInfo;
+            qInfo() << "getServerInfo response received";
         }
 
         // Populate the HTTPS port
@@ -283,7 +283,7 @@ NvHTTP::startApp(QString verb,
                                              allParams,
                                              LAUNCH_TIMEOUT_MS);
 
-    qInfo() << "Launch response:" << response;
+    qInfo() << "Launch response received";
 
     // Throws if the request failed
     verifyResponseStatus(response);
@@ -300,7 +300,7 @@ NvHTTP::quitApp()
                                    nullptr,
                                    QUIT_TIMEOUT_MS);
 
-    qInfo() << "Quit response:" << response;
+    qInfo() << "Quit response received";
 
     // Throws if the request failed
     verifyResponseStatus(response);
