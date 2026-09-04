@@ -58,6 +58,11 @@ Thumbs.db
 # Dependencies
 node_modules/
 
+# Local secrets / per-developer environment files (e.g. Cloudflare Worker
+# secrets for Wave 4's services/crash-endpoint, read by `wrangler dev`).
+.env
+.dev.vars
+
 # Generated QML cache
 *qmlcache*
 
