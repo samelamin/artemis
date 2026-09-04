@@ -2074,7 +2074,7 @@ Flickable {
                     Keys.onRightPressed: nextItemInFocusChain(true).forceActiveFocus(Qt.TabFocus)
                     Keys.onLeftPressed: nextItemInFocusChain(false).forceActiveFocus(Qt.TabFocus)
                     onClicked: {
-                        diagnosticsPreviewDialog.previewText = DiagnosticReporter.buildPreview(diagnosticsNoteField.text)
+                        diagnosticsPreviewDialog.previewParts = DiagnosticReporter.buildPreviewParts(diagnosticsNoteField.text)
                         diagnosticsPreviewDialog.open()
                     }
                 }
@@ -2089,7 +2089,8 @@ Flickable {
                     Keys.onRightPressed: nextItemInFocusChain(true).forceActiveFocus(Qt.TabFocus)
                     Keys.onLeftPressed: nextItemInFocusChain(false).forceActiveFocus(Qt.TabFocus)
                     onClicked: {
-                        DiagnosticReporter.sendReport(diagnosticsNoteField.text)
+                        diagnosticsPreviewDialog.previewParts = DiagnosticReporter.buildPreviewParts(diagnosticsNoteField.text)
+                        diagnosticsPreviewDialog.open()
                     }
                 }
 
@@ -2144,19 +2145,101 @@ Flickable {
                 width: Math.min(Overlay.overlay.width * 0.9, 900)
                 height: Math.min(Overlay.overlay.height * 0.9, 700)
                 title: qsTr("Diagnostic report preview")
-                standardButtons: Dialog.Close
 
-                property string previewText: ""
+                property var previewParts: ({})
+
+                onOpened: Qt.callLater(function() {
+                    previewScrollView.contentItem.contentY =
+                        Math.max(0, previewScrollView.contentItem.contentHeight - previewScrollView.height)
+                })
 
                 ScrollView {
+                    id: previewScrollView
                     anchors.fill: parent
-                    TextArea {
-                        readOnly: true
-                        selectByMouse: true
-                        wrapMode: TextArea.NoWrap
-                        font.family: "Monospace"
-                        font.pointSize: 9
-                        text: diagnosticsPreviewDialog.previewText
+                    clip: true
+
+                    Column {
+                        width: previewScrollView.availableWidth
+                        spacing: 6
+
+                        Repeater {
+                            model: [
+                                { label: qsTr("App version"), value: diagnosticsPreviewDialog.previewParts.version || "" },
+                                { label: qsTr("Commit"), value: diagnosticsPreviewDialog.previewParts.commit || "" },
+                                { label: qsTr("OS"), value: diagnosticsPreviewDialog.previewParts.os || "" },
+                                { label: qsTr("Kernel type"), value: diagnosticsPreviewDialog.previewParts.kernelType || "" },
+                                { label: qsTr("Kernel version"), value: diagnosticsPreviewDialog.previewParts.kernelVersion || "" },
+                                { label: qsTr("Architecture"), value: diagnosticsPreviewDialog.previewParts.arch || "" },
+                                { label: qsTr("ABI"), value: diagnosticsPreviewDialog.previewParts.abi || "" },
+                                { label: qsTr("Note"), value: diagnosticsPreviewDialog.previewParts.note || "" },
+                                { label: qsTr("Crash report attached"), value: diagnosticsPreviewDialog.previewParts.hasCrash ? qsTr("Yes") : qsTr("No") }
+                            ]
+                            delegate: RowLayout {
+                                width: previewScrollView.availableWidth
+                                spacing: 8
+                                Label {
+                                    text: modelData.label
+                                    font.bold: true
+                                    Layout.preferredWidth: 160
+                                }
+                                Label {
+                                    text: modelData.value
+                                    wrapMode: Text.Wrap
+                                    Layout.fillWidth: true
+                                }
+                            }
+                        }
+
+                        Label {
+                            text: qsTr("Log tail")
+                            font.bold: true
+                            topPadding: 8
+                        }
+
+                        TextArea {
+                            width: previewScrollView.availableWidth
+                            readOnly: true
+                            selectByMouse: true
+                            wrapMode: TextArea.NoWrap
+                            font.family: "Monospace"
+                            font.pointSize: 9
+                            text: diagnosticsPreviewDialog.previewParts.logText || ""
+                        }
+
+                        Label {
+                            visible: diagnosticsPreviewDialog.previewParts.hasCrash === true
+                            text: qsTr("Crash report")
+                            font.bold: true
+                            topPadding: 8
+                        }
+
+                        TextArea {
+                            visible: diagnosticsPreviewDialog.previewParts.hasCrash === true
+                            width: previewScrollView.availableWidth
+                            readOnly: true
+                            selectByMouse: true
+                            wrapMode: TextArea.NoWrap
+                            font.family: "Monospace"
+                            font.pointSize: 9
+                            text: diagnosticsPreviewDialog.previewParts.crashText || ""
+                        }
+                    }
+                }
+
+                footer: DialogButtonBox {
+                    Button {
+                        text: qsTr("Send")
+                        enabled: DiagnosticReporter.state !== DiagnosticReporter.Sending
+                        DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+                        onClicked: {
+                            DiagnosticReporter.sendReport(diagnosticsNoteField.text)
+                            diagnosticsPreviewDialog.close()
+                        }
+                    }
+                    Button {
+                        text: qsTr("Cancel")
+                        DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+                        onClicked: diagnosticsPreviewDialog.close()
                     }
                 }
             }

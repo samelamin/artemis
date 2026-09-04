@@ -79,7 +79,7 @@ export async function recordDailyUsage(
   const state = parseBudgetState(raw);
   state.bytes += bytes;
   state.requests += 1;
-  await kv.put(key, JSON.stringify(state));
+  await kv.put(key, JSON.stringify(state), { expirationTtl: 172800 });
 }
 
 function parseBudgetState(raw: string | null): BudgetState {
@@ -138,15 +138,15 @@ export async function handlePutReport(
     }
   }
 
-  const buf = await request.arrayBuffer();
-  if (buf.byteLength > MAX_BODY_BYTES) {
-    return jsonResponse({ error: "body too large" }, 413);
-  }
-
   const ip = callerIp(request);
   const rate = await env.REPORT_RATE_LIMITER.limit({ key: ip });
   if (!rate.success) {
     return jsonResponse({ error: "rate limited" }, 429);
+  }
+
+  const buf = await request.arrayBuffer();
+  if (buf.byteLength > MAX_BODY_BYTES) {
+    return jsonResponse({ error: "body too large" }, 413);
   }
 
   const budget = await checkDailyBudget(env.DAILY_BUDGET_KV, buf.byteLength, now);

@@ -6,6 +6,7 @@
 #include <QScopedPointer>
 #include <QString>
 #include <QTimer>
+#include <QVariantMap>
 
 class QNetworkReply;
 
@@ -37,6 +38,7 @@ public:
     QString errorMessage() const;
 
     Q_INVOKABLE QString buildPreview(const QString &note);
+    Q_INVOKABLE QVariantMap buildPreviewParts(const QString &note);
     Q_INVOKABLE void sendReport(const QString &note);
     Q_INVOKABLE bool saveToDownloads(const QString &note);
 

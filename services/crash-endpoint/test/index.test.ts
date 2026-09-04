@@ -10,11 +10,19 @@ import worker from "../src/index";
 
 class FakeKV {
   store = new Map<string, string>();
+  ttls = new Map<string, number>();
   async get(key: string): Promise<string | null> {
     return this.store.get(key) ?? null;
   }
-  async put(key: string, value: string): Promise<void> {
+  async put(
+    key: string,
+    value: string,
+    options?: { expirationTtl?: number },
+  ): Promise<void> {
     this.store.set(key, value);
+    if (options?.expirationTtl !== undefined) {
+      this.ttls.set(key, options.expirationTtl);
+    }
   }
 }
 
@@ -213,6 +221,28 @@ describe("handler", () => {
     expect(ctx.limiter.calls).toEqual([{ key: "1.2.3.4" }]);
   });
 
+  it("perIpRateLimit: rejects a request with no Content-Length before buffering the body", async () => {
+    ctx.limiter.success = false;
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2, 3]));
+        // Intentionally never closes — if the handler tried to fully
+        // buffer this body it would hang forever.
+      },
+    });
+    const req = new Request("https://example.com/v1/report", {
+      method: "PUT",
+      headers: { "CF-Connecting-IP": "9.9.9.9" },
+      // @ts-expect-error duplex is required by the fetch spec for
+      // streaming bodies but is missing from this Request typing.
+      duplex: "half",
+      body: stream,
+    });
+    const res = await handlePutReport(req, ctx.env, NOW);
+    expect(res.status).toBe(429);
+    expect(ctx.r2.objects).toHaveLength(0);
+  });
+
   it("globalDailyBudget: bytes already at cap returns 503 and does not call R2", async () => {
     ctx.kv.store.set(
       budgetKeyFor(NOW),
@@ -293,6 +323,17 @@ describe("handler", () => {
     const parsed = JSON.parse(stored!) as { bytes: number; requests: number };
     expect(parsed.bytes).toBe(5);
     expect(parsed.requests).toBe(1);
+  });
+
+  it("records daily usage in KV with a 172800s expirationTtl", async () => {
+    const payload = new Uint8Array([1, 2, 3, 4, 5]);
+    const req = new Request("https://example.com/v1/report", {
+      method: "PUT",
+      headers: { "X-Vbt-Ver": "1.0.0" },
+      body: payload,
+    });
+    await handlePutReport(req, ctx.env, NOW);
+    expect(ctx.kv.ttls.get(budgetKeyFor(NOW))).toBe(172800);
   });
 
   it("falls back to 'unknown' caller ip when CF-Connecting-IP is absent", async () => {

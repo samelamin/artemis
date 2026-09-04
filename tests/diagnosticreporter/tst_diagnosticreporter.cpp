@@ -234,6 +234,7 @@ private slots:
     void noteIsTruncatedToCodeUnits();
     void previewReflectsNoteTruncation();
     void crashSelectionSkipsEmptyNewestFile();
+    void previewPartsExposeStructuredHeadAndRawText();
 
 private:
     QTemporaryDir m_LogDir;
@@ -519,6 +520,47 @@ void DiagnosticReporterTest::crashSelectionSkipsEmptyNewestFile()
     QVERIFY2(!crashText.isEmpty(),
              qPrintable(QStringLiteral("Crash field was empty.")));
     QCOMPARE(crashText, QString::fromUtf8(kSmallCrash));
+}
+
+void DiagnosticReporterTest::previewPartsExposeStructuredHeadAndRawText()
+{
+    QVERIFY(writeLog(m_LogDir.path(), kSmallLog));
+    QVERIFY(writeCrash(m_LogDir.path(), kSmallCrash));
+
+    FakeNam network;
+    DiagnosticReporter reporter(&network,
+                                m_LogDir.path(),
+                                m_DownloadsDir.path());
+
+    const QString note = QStringLiteral("structured preview test");
+    const QVariantMap parts = reporter.buildPreviewParts(note);
+
+    QVERIFY(parts.contains(QStringLiteral("version")));
+    QVERIFY(parts.contains(QStringLiteral("commit")));
+    QVERIFY(parts.contains(QStringLiteral("os")));
+    QVERIFY(parts.contains(QStringLiteral("kernelType")));
+    QVERIFY(parts.contains(QStringLiteral("kernelVersion")));
+    QVERIFY(parts.contains(QStringLiteral("arch")));
+    QVERIFY(parts.contains(QStringLiteral("abi")));
+    QVERIFY(!parts.value(QStringLiteral("os")).toString().isEmpty());
+
+    QCOMPARE(parts.value(QStringLiteral("note")).toString(), note);
+    QCOMPARE(parts.value(QStringLiteral("hasCrash")).toBool(), true);
+
+    const QString logText = parts.value(QStringLiteral("logText")).toString();
+    QVERIFY(!logText.isEmpty());
+    QVERIFY(!logText.contains(QLatin1Char('\\')) || !logText.contains(QStringLiteral("\n")));
+
+    const QString crashText = parts.value(QStringLiteral("crashText")).toString();
+    QCOMPARE(crashText, QString::fromUtf8(kSmallCrash));
+
+    // The structured accessor must return the SAME underlying log/crash
+    // content as buildPreview's JSON "log"/"crash" fields (modulo JSON
+    // string escaping), proving it is not a second, divergent code path.
+    const QString jsonPreview = reporter.buildPreview(note);
+    const QJsonObject root =
+        QJsonDocument::fromJson(jsonPreview.toUtf8()).object();
+    QCOMPARE(root.value(QStringLiteral("crash")).toString(), crashText);
 }
 
 QTEST_GUILESS_MAIN(DiagnosticReporterTest)

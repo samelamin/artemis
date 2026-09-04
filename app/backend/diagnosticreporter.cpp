@@ -338,6 +338,32 @@ QString DiagnosticReporter::buildPreview(const QString &note)
     return QString::fromUtf8(buildBundleJson(note, kLogTailByteCap));
 }
 
+QVariantMap DiagnosticReporter::buildPreviewParts(const QString &note)
+{
+    const QString trimmedNote = truncateToCodeUnits(note, kNoteCodeUnits);
+
+    bool logOk = false;
+    const QByteArray logBytes = readLogTail(kLogTailByteCap, &logOk);
+    const QString logText = logOk ? QString::fromUtf8(logBytes) : QString();
+
+    bool crashFound = false;
+    const QString crashText = readLatestCrashFile(&crashFound);
+
+    QVariantMap parts;
+    parts.insert(QStringLiteral("version"), QString::fromLatin1(VERSION_STR));
+    parts.insert(QStringLiteral("commit"), QString::fromLatin1(VIBERTEMIS_BUILD_COMMIT));
+    parts.insert(QStringLiteral("os"), QSysInfo::prettyProductName());
+    parts.insert(QStringLiteral("kernelType"), QSysInfo::kernelType());
+    parts.insert(QStringLiteral("kernelVersion"), QSysInfo::kernelVersion());
+    parts.insert(QStringLiteral("arch"), QSysInfo::currentCpuArchitecture());
+    parts.insert(QStringLiteral("abi"), QSysInfo::buildAbi());
+    parts.insert(QStringLiteral("note"), trimmedNote);
+    parts.insert(QStringLiteral("hasCrash"), crashFound);
+    parts.insert(QStringLiteral("logText"), logText);
+    parts.insert(QStringLiteral("crashText"), crashFound ? crashText : QString());
+    return parts;
+}
+
 bool DiagnosticReporter::saveToDownloads(const QString &note)
 {
     if (m_DownloadsDir.isEmpty()) {

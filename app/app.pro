@@ -228,6 +228,7 @@ SOURCES += \
     backend/buildinfo.cpp \
     backend/desktopinstallerportal.cpp \
     backend/diagnosticreporter.cpp \
+    backend/logscrubber.cpp \
     backend/pendingupdate.cpp \
     backend/releaseversionselector.cpp \
     backend/rollingupdateparser.cpp \
@@ -281,6 +282,7 @@ HEADERS += \
     backend/buildinfo.h \
     backend/desktopinstallerportal.h \
     backend/diagnosticreporter.h \
+    backend/logscrubber.h \
     backend/pendingupdate.h \
     backend/releaseversionselector.h \
     backend/updateresult.h \
