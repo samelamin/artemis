@@ -267,7 +267,7 @@ void OTPPairingManager::sendOTPPairingRequest(NvComputer *computer, const QStrin
                 qWarning() << "OTPPairingManager: No server certificate in OTP response";
             }
         } else {
-            emit pairingFailed("Apollo OTP pairing failed: " + pairingRequest);
+            emit pairingFailed("Apollo OTP pairing failed. Check the server logs.");
         }
 
     } catch (const GfeHttpResponseException& e) {

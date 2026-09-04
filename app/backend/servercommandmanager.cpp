@@ -577,13 +577,13 @@ bool ServerCommandManager::sendHttpServerCommand(const QString &commandId)
             emit commandExecuted(commandId, true, "Command executed successfully via HTTP");
             return true;
         } else {
-            qWarning() << "ServerCommandManager::sendHttpServerCommand: Command failed via HTTP, response:" << response;
+            qWarning() << "ServerCommandManager::sendHttpServerCommand: Command failed via HTTP";
             
             // Reset execution state and emit failure
             m_isExecuting = false;
             m_currentExecutingCommand.clear();
             emit executionStateChanged();
-            emit commandFailed(commandId, "HTTP command execution failed: " + response);
+            emit commandFailed(commandId, "HTTP command execution failed. Check the server logs.");
             return true; // Return true to indicate we handled the command (even if it failed)
         }
         
