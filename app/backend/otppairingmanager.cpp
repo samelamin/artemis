@@ -181,7 +181,7 @@ void OTPPairingManager::sendOTPPairingRequest(NvComputer *computer, const QStrin
             .arg(QString(IdentityManager::get()->getCertificate().toHex()))
             .arg(otpHash);
         
-        qDebug() << "OTPPairingManager: Pairing parameters:" << pairingParams;
+        qDebug() << "OTPPairingManager: Pairing parameters built";
         
         QString pairingRequest;
         
@@ -198,7 +198,7 @@ void OTPPairingManager::sendOTPPairingRequest(NvComputer *computer, const QStrin
         qDebug() << "OTPPairingManager: HTTP request successful";
         
         qDebug() << "OTPPairingManager: Used HTTP protocol for OTP pairing";
-        qDebug() << "OTPPairingManager: Received response:" << pairingRequest;
+        qDebug() << "OTPPairingManager: Received response";
         
         // Parse the XML response
         if (pairingRequest.isEmpty()) {

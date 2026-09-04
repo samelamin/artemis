@@ -997,7 +997,7 @@ qDebug() << "PendingOTPPairingTask: Generated AES key from salt+PIN";
                 5000
             );
             
-            qDebug() << "PendingOTPPairingTask: Received response:" << pairingRequest;
+            qDebug() << "PendingOTPPairingTask: Received response";
             
             // Parse the response
             if (pairingRequest.isEmpty()) {
@@ -1077,8 +1077,8 @@ qDebug() << "PendingOTPPairingTask: Generated AES key from salt+PIN";
                     return;
                 }
             } else {
-                qDebug() << "PendingOTPPairingTask: OTP pairing failed with response:" << pairingRequest;
-                emit pairingCompleted(m_Computer, "Apollo OTP pairing failed: " + pairingRequest);
+                qDebug() << "PendingOTPPairingTask: OTP pairing failed with response";
+                emit pairingCompleted(m_Computer, "Apollo OTP pairing failed. Check the server logs.");
                 return;
             }
             
