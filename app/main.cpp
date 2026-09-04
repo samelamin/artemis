@@ -46,6 +46,7 @@
 #include "gui/computermodel.h"
 #include "gui/appmodel.h"
 #include "backend/autoupdatechecker.h"
+#include "backend/diagnosticreporter.h"
 #include "backend/buildinfo.h"
 #include "backend/computermanager.h"
 #include "backend/systemproperties.h"
@@ -792,6 +793,11 @@ int main(int argc, char *argv[])
                                                 "AutoUpdateChecker",
                                                 [](QQmlEngine*, QJSEngine*) -> QObject* {
                                                     return new AutoUpdateChecker();
+                                                });
+    qmlRegisterSingletonType<DiagnosticReporter>("DiagnosticReporter", 1, 0,
+                                                "DiagnosticReporter",
+                                                [](QQmlEngine*, QJSEngine*) -> QObject* {
+                                                    return new DiagnosticReporter();
                                                 });
     qmlRegisterSingletonType<SystemProperties>("SystemProperties", 1, 0,
                                                "SystemProperties",

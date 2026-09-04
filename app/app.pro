@@ -227,6 +227,7 @@ SOURCES += \
     backend/autoupdatechecker.cpp \
     backend/buildinfo.cpp \
     backend/desktopinstallerportal.cpp \
+    backend/diagnosticreporter.cpp \
     backend/pendingupdate.cpp \
     backend/releaseversionselector.cpp \
     backend/rollingupdateparser.cpp \
@@ -279,6 +280,7 @@ HEADERS += \
     backend/autoupdatechecker.h \
     backend/buildinfo.h \
     backend/desktopinstallerportal.h \
+    backend/diagnosticreporter.h \
     backend/pendingupdate.h \
     backend/releaseversionselector.h \
     backend/updateresult.h \
@@ -586,6 +588,8 @@ DEPENDPATH += $$PWD/../h264bitstream/h264bitstream
 }
 
 unix:!macx: {
+    LIBS += -lz
+
     isEmpty(PREFIX) {
         PREFIX = /usr/local
     }
@@ -660,3 +664,7 @@ DEFINES += VIBERTEMIS_BUILD_COMMIT=\\\"$$VIBERTEMIS_BUILD_COMMIT\\\"
 DEFINES += VIBERTEMIS_UPDATE_CHANNEL=\\\"$$VIBERTEMIS_UPDATE_CHANNEL\\\"
 DEFINES += VIBERTEMIS_BUILD_SEQUENCE=$$VIBERTEMIS_BUILD_SEQUENCE
 DEFINES += VIBERTEMIS_APPLICATION_ID=\\\"$$VIBERTEMIS_APPLICATION_ID\\\"
+
+isEmpty(VBT_DIAG_ENDPOINT): VBT_DIAG_ENDPOINT = $$(VBT_DIAG_ENDPOINT)
+isEmpty(VBT_DIAG_ENDPOINT): VBT_DIAG_ENDPOINT = https://crash-endpoint.workers.dev/v1/report
+DEFINES += VBT_DIAG_ENDPOINT=\\\"$$VBT_DIAG_ENDPOINT\\\"

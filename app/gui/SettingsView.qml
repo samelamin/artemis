@@ -10,6 +10,7 @@ import SdlGamepadKeyNavigation 1.0
 import SystemProperties 1.0
 import ClipboardManager 1.0
 import ServerCommandManager 1.0
+import DiagnosticReporter 1.0
 
 Flickable {
     id: settingsPage
@@ -2029,6 +2030,134 @@ Flickable {
                     wrapMode: Text.Wrap
                     color: "#aaaaaa"
                     topPadding: 10
+                }
+            }
+        }
+
+        GroupBox {
+            id: diagnosticsGroupBox
+            width: (parent.width - (parent.leftPadding + parent.rightPadding))
+            padding: 12
+            title: "<font color=\"skyblue\">" + qsTr("Diagnostics") + "</font>"
+            font.pointSize: 12
+
+            Column {
+                anchors.fill: parent
+                spacing: 10
+
+                Label {
+                    width: parent.width
+                    text: qsTr("A diagnostic report includes recent app logs, system info, and (if the app crashed) a crash report — with IP addresses, hostnames, usernames, and other identifying details automatically removed. Nothing is sent unless you click Send below. You can preview the exact contents first.")
+                    font.pointSize: 9
+                    wrapMode: Text.Wrap
+                    color: "#aaaaaa"
+                }
+
+                TextField {
+                    id: diagnosticsNoteField
+                    width: parent.width
+                    placeholderText: qsTr("Optional note (max 280 characters)")
+                    maximumLength: 280
+                    activeFocusOnTab: true
+                    Keys.onReturnPressed: nextItemInFocusChain(true).forceActiveFocus(Qt.TabFocus)
+                    Keys.onEnterPressed: nextItemInFocusChain(true).forceActiveFocus(Qt.TabFocus)
+                    Keys.onRightPressed: nextItemInFocusChain(true).forceActiveFocus(Qt.TabFocus)
+                    Keys.onLeftPressed: nextItemInFocusChain(false).forceActiveFocus(Qt.TabFocus)
+                }
+
+                Button {
+                    id: previewReportButton
+                    text: qsTr("Preview report")
+                    activeFocusOnTab: true
+                    Keys.onReturnPressed: clicked()
+                    Keys.onEnterPressed: clicked()
+                    Keys.onRightPressed: nextItemInFocusChain(true).forceActiveFocus(Qt.TabFocus)
+                    Keys.onLeftPressed: nextItemInFocusChain(false).forceActiveFocus(Qt.TabFocus)
+                    onClicked: {
+                        diagnosticsPreviewDialog.previewText = DiagnosticReporter.buildPreview(diagnosticsNoteField.text)
+                        diagnosticsPreviewDialog.open()
+                    }
+                }
+
+                Button {
+                    id: sendReportButton
+                    text: qsTr("Send diagnostic report")
+                    activeFocusOnTab: true
+                    enabled: DiagnosticReporter.state !== DiagnosticReporter.Sending
+                    Keys.onReturnPressed: clicked()
+                    Keys.onEnterPressed: clicked()
+                    Keys.onRightPressed: nextItemInFocusChain(true).forceActiveFocus(Qt.TabFocus)
+                    Keys.onLeftPressed: nextItemInFocusChain(false).forceActiveFocus(Qt.TabFocus)
+                    onClicked: {
+                        DiagnosticReporter.sendReport(diagnosticsNoteField.text)
+                    }
+                }
+
+                Label {
+                    id: diagnosticsStatusLabel
+                    width: parent.width
+                    font.pointSize: 10
+                    wrapMode: Text.Wrap
+                    text: {
+                        if (DiagnosticReporter.state === DiagnosticReporter.Sending) {
+                            return qsTr("Sending diagnostic report...")
+                        }
+                        if (DiagnosticReporter.state === DiagnosticReporter.Sent) {
+                            return qsTr("Report sent: %1").arg(DiagnosticReporter.reportId)
+                        }
+                        if (DiagnosticReporter.state === DiagnosticReporter.Failed) {
+                            return qsTr("Send failed: %1").arg(DiagnosticReporter.errorMessage)
+                        }
+                        return ""
+                    }
+                }
+
+                Button {
+                    id: saveReportButton
+                    text: qsTr("Save report to Downloads")
+                    activeFocusOnTab: true
+                    Keys.onReturnPressed: clicked()
+                    Keys.onEnterPressed: clicked()
+                    Keys.onRightPressed: nextItemInFocusChain(true).forceActiveFocus(Qt.TabFocus)
+                    Keys.onLeftPressed: nextItemInFocusChain(false).forceActiveFocus(Qt.TabFocus)
+                    onClicked: {
+                        if (DiagnosticReporter.saveToDownloads(diagnosticsNoteField.text)) {
+                            diagnosticsSaveResultLabel.text = qsTr("Report saved to Downloads.")
+                        } else {
+                            diagnosticsSaveResultLabel.text = qsTr("Could not save the report to Downloads.")
+                        }
+                    }
+                }
+
+                Label {
+                    id: diagnosticsSaveResultLabel
+                    width: parent.width
+                    font.pointSize: 10
+                    wrapMode: Text.Wrap
+                }
+            }
+
+            Dialog {
+                id: diagnosticsPreviewDialog
+                modal: true
+                anchors.centerIn: Overlay.overlay
+                width: Math.min(Overlay.overlay.width * 0.9, 900)
+                height: Math.min(Overlay.overlay.height * 0.9, 700)
+                title: qsTr("Diagnostic report preview")
+                standardButtons: Dialog.Close
+
+                property string previewText: ""
+
+                ScrollView {
+                    anchors.fill: parent
+                    TextArea {
+                        readOnly: true
+                        selectByMouse: true
+                        wrapMode: TextArea.NoWrap
+                        font.family: "Monospace"
+                        font.pointSize: 9
+                        text: diagnosticsPreviewDialog.previewText
+                    }
                 }
             }
         }
