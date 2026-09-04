@@ -79,7 +79,7 @@ QString pickNewest(const QDir &dir, bool (*match)(const QString &))
     const QFileInfoList entries =
         dir.entryInfoList(QDir::Files | QDir::NoSymLinks, QDir::Time);
     for (const QFileInfo &info : entries) {
-        if (match(info.fileName())) {
+        if (match(info.fileName()) && info.size() > 0) {
             return info.fileName();
         }
     }

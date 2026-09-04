@@ -17,4 +17,6 @@ void setCrashing(bool crashing);
 
 std::size_t snapshot(char* outBuffer, std::size_t outBufferSize);
 
+std::size_t snapshotToFd(int fd);
+
 }

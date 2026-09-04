@@ -233,6 +233,7 @@ private slots:
     void previewByteIdenticalToUploadedPayload();
     void noteIsTruncatedToCodeUnits();
     void previewReflectsNoteTruncation();
+    void crashSelectionSkipsEmptyNewestFile();
 
 private:
     QTemporaryDir m_LogDir;
@@ -465,6 +466,59 @@ void DiagnosticReporterTest::previewReflectsNoteTruncation()
     const QString preview = reporter.buildPreview(note);
     QVERIFY(preview.contains(QStringLiteral("\"note\": \"yyy")));
     QVERIFY(preview.contains(QString(280, QLatin1Char('y'))));
+}
+
+void DiagnosticReporterTest::crashSelectionSkipsEmptyNewestFile()
+{
+    // Seed the log dir with the older, non-empty crash file first.
+    QVERIFY(writeCrash(m_LogDir.path(), kSmallCrash));
+
+    // Sleep long enough to cross the 1-second mtime-resolution boundary so
+    // the newer empty file's mtime is genuinely later than the older one's,
+    // regardless of any filesystem with 1-second mtime granularity.
+    QTest::qSleep(1100);
+
+    // Write a newer, lexically-later crash file that is empty. CrashHandler
+    // unconditionally creates an empty file on every launch, and pickNewest
+    // must skip it so the previous run's real crash is reported.
+    const QString emptyCrashPath = QDir(m_LogDir.path()).filePath(QStringLiteral(
+        "Artemis-crash-1800000000000.txt"));
+    {
+        QFile emptyCrash(emptyCrashPath);
+        QVERIFY(emptyCrash.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        // Leave the file empty on purpose; do not write any bytes.
+        emptyCrash.close();
+        QVERIFY(QFileInfo(emptyCrashPath).size() == 0);
+    }
+
+    QVERIFY(writeLog(m_LogDir.path(), kSmallLog));
+
+    FakeNam network;
+    DiagnosticReporter reporter(&network,
+                                m_LogDir.path(),
+                                m_DownloadsDir.path());
+
+    const QString preview = reporter.buildPreview(QString());
+    const QJsonDocument doc = QJsonDocument::fromJson(preview.toUtf8());
+    QVERIFY2(doc.isObject(),
+             qPrintable(QStringLiteral("Preview was not a JSON object: ")
+                        + preview));
+
+    const QJsonObject root = doc.object();
+    QVERIFY(root.contains(QStringLiteral("crash")));
+    const QJsonValue crashValue = root.value(QStringLiteral("crash"));
+    QVERIFY2(!crashValue.isNull(),
+             qPrintable(QStringLiteral("Crash field unexpectedly null; "
+                                       "the empty newer crash file was "
+                                       "selected instead of the older "
+                                       "non-empty one.")));
+    QVERIFY2(crashValue.isString(),
+             qPrintable(QStringLiteral("Crash field was not a string: ")
+                        + crashValue.toString()));
+    const QString crashText = crashValue.toString();
+    QVERIFY2(!crashText.isEmpty(),
+             qPrintable(QStringLiteral("Crash field was empty.")));
+    QCOMPARE(crashText, QString::fromUtf8(kSmallCrash));
 }
 
 QTEST_GUILESS_MAIN(DiagnosticReporterTest)

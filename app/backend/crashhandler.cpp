@@ -32,6 +32,10 @@ namespace {
 // for the lifetime of the process so the handler never has to call open().
 int s_CrashFd = -1;
 
+// Path of the crash file chosen at install time. Exposed via crashFilePath()
+// so main() can unlink the current run's empty crash file at clean shutdown.
+QString s_CrashPath;
+
 // Alternate signal stack. A handler running on the overflowed stack itself
 // would immediately re-fault, so SIGSEGV from a stack overflow must run
 // here.
@@ -140,12 +144,7 @@ void writeProcMaps(int fd)
 
 void writeRingBuffer(int fd)
 {
-    char buf[CrashRingBuffer::kCapacity];
-    const std::size_t n = CrashRingBuffer::snapshot(buf, sizeof(buf));
-    if (n > 0) {
-        ssize_t written = ::write(fd, buf, n);
-        (void)written;
-    }
+    CrashRingBuffer::snapshotToFd(fd);
 }
 
 // Resolve the canonical path of this executable. Returns the length written
@@ -360,6 +359,11 @@ void handleSignal(int sig, siginfo_t* info, void* /*ucontext*/)
 
 } // namespace
 
+QString crashFilePath()
+{
+    return s_CrashPath;
+}
+
 void install()
 {
     // Open the crash file once at install time so the handler never has to.
@@ -375,6 +379,7 @@ void install()
     const QString crashPath = crashDir + QStringLiteral("/Artemis-crash-")
                               + QString::number(QDateTime::currentMSecsSinceEpoch())
                               + QStringLiteral(".txt");
+    s_CrashPath = crashPath;
 
     const QByteArray pathUtf8 = crashPath.toUtf8();
     s_CrashFd = ::open(pathUtf8.constData(),
@@ -405,6 +410,11 @@ void install()
     struct sigaction sa {};
     sa.sa_sigaction = &handleSignal;
     sigemptyset(&sa.sa_mask);
+    sigaddset(&sa.sa_mask, SIGSEGV);
+    sigaddset(&sa.sa_mask, SIGABRT);
+    sigaddset(&sa.sa_mask, SIGBUS);
+    sigaddset(&sa.sa_mask, SIGFPE);
+    sigaddset(&sa.sa_mask, SIGILL);
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESETHAND;
 
     ::sigaction(SIGSEGV, &sa, nullptr);

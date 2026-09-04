@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <unistd.h>
 
 namespace CrashRingBuffer {
 
@@ -101,6 +102,32 @@ std::size_t snapshot(char* outBuffer, std::size_t outBufferSize)
     }
 
     return copied;
+}
+
+std::size_t snapshotToFd(int fd)
+{
+    // The crash handler must never take the spinlock or call anything that
+    // can block. A best-effort, possibly-torn snapshot is fine and expected.
+    //
+    // Stream the buffer straight to the fd in at most two ::write() calls
+    // instead of building a caller buffer. This avoids the 64 KB on-stack
+    // buffer that would otherwise exhaust the entire alternate signal stack
+    // (kAltStackSize is also 64 KB), which is the exact case sigaltstack
+    // exists to survive.
+    const std::size_t head = s_WriteIndex.load(std::memory_order_acquire);
+
+    const std::size_t firstSpan = kSlotCapacity - head;
+    ssize_t w1 = ::write(fd, s_Buffer + head, firstSpan);
+    (void)w1;
+    std::size_t written = firstSpan;
+
+    if (head > 0) {
+        ssize_t w2 = ::write(fd, s_Buffer, head);
+        (void)w2;
+        written += head;
+    }
+
+    return written;
 }
 
 }

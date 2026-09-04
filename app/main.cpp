@@ -1,5 +1,6 @@
 #include <QGuiApplication>
 #include <QCoreApplication>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -122,6 +123,7 @@ static QRegularExpression k_RikeyIdRegex("&rikeyid=[\\d-]+");
 static const uint64_t k_MaxLogSizeBytes = 10 * 1024 * 1024;
 static QAtomicInteger<uint64_t> s_LogBytesWritten = 0;
 static QFile* s_LoggerFile;
+static bool s_LoggerFileActive = false;
 #endif
 
 class LoggerTask : public QRunnable
@@ -140,8 +142,14 @@ public:
         // or running under systemd). Keep stderr as a second sink so those
         // redirections still receive log output. Windows and Mac keep the
         // pre-existing behavior where the file stream replaces stderr.
-        std::fwrite(m_Msg.constData(), 1, static_cast<std::size_t>(m_Msg.size()), stderr);
-        std::fflush(stderr);
+        //
+        // Only do this when the file redirect actually succeeded. If the
+        // log file failed to open, s_LoggerStream is still targeting
+        // stderr, and writing to it twice would duplicate every line.
+        if (s_LoggerFileActive) {
+            std::fwrite(m_Msg.constData(), 1, static_cast<std::size_t>(m_Msg.size()), stderr);
+            std::fflush(stderr);
+        }
 #endif
         s_LoggerStream << m_Msg;
         s_LoggerStream.flush();
@@ -173,7 +181,9 @@ void logToLoggerStream(QString& message)
     // handler can dump the last log lines even when the async logger thread
     // is still draining. CrashRingBuffer::append is a no-op once the crash
     // handler has set its crashing flag.
+#ifdef Q_OS_LINUX
     CrashRingBuffer::append(message);
+#endif
 
 #ifdef LOG_TO_FILE
     auto oldLogSize = s_LogBytesWritten.fetchAndAddRelaxed(message.size());
@@ -435,6 +445,7 @@ int main(int argc, char *argv[])
         if (s_LoggerFile->open(QIODevice::WriteOnly | QIODevice::Text)) {
             QTextStream(stderr) << "Redirecting log output to " << s_LoggerFile->fileName() << Qt::endl;
             s_LoggerStream.setDevice(s_LoggerFile);
+            s_LoggerFileActive = true;
         }
     }
 #endif
@@ -476,6 +487,14 @@ int main(int argc, char *argv[])
         qInfo() << "Removing old log file:" << existingLogNames.at(i);
         QFile(tempDir.filePath(existingLogNames.at(i))).remove();
     }
+#ifdef Q_OS_LINUX
+    // Prune the oldest existing crash files if there are more than 10
+    QStringList existingCrashNames = tempDir.entryList(QStringList("Artemis-crash-*.txt"), QDir::NoFilter, QDir::SortFlag::Time);
+    for (int i = 10; i < existingCrashNames.size(); i++) {
+        qInfo() << "Removing old crash file:" << existingCrashNames.at(i);
+        QFile(tempDir.filePath(existingCrashNames.at(i))).remove();
+    }
+#endif
 #endif
 
 #if defined(Q_OS_WIN32)
@@ -914,6 +933,18 @@ int main(int argc, char *argv[])
     }
 
     int err = app.exec();
+
+#ifdef Q_OS_LINUX
+    {
+        const QString crashPath = CrashHandler::crashFilePath();
+        if (!crashPath.isEmpty()) {
+            QFileInfo crashInfo(crashPath);
+            if (crashInfo.exists() && crashInfo.size() == 0) {
+                QFile::remove(crashPath);
+            }
+        }
+    }
+#endif
 
     // Give worker tasks time to properly exit. Fixes PendingQuitTask
     // sometimes freezing and blocking process exit.

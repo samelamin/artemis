@@ -6,7 +6,7 @@ unix:!macx {
     DEFINES += VIBERTEMIS_HAS_DESKTOP_PORTAL
 }
 
-linux-g++* {
+unix:!macx {
     message(Crash diagnostics enabled)
 
     SOURCES += \
