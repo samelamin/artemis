@@ -234,26 +234,21 @@ PUT /v1/report
 
 ## Deploy
 
-`naseyma/infra/env/backup.env` holds `CLOUDFLARE_ACCOUNT_ID`,
-`CLOUDFLARE_R2_ACCESS_KEY_ID`, `CLOUDFLARE_R2_SECRET_ACCESS_KEY` and
-`R2_BUCKET_NAME=naseyma-backups`. Verified working: listing
-`s3://naseyma-backups/` succeeds; `ListBuckets` is denied, so the key is
-scoped to that one bucket.
+Deployment needs a Cloudflare API token with `Workers Scripts:Edit` and
+`Workers R2 Storage:Edit`. R2 S3 access keys are not sufficient — they cover
+object storage but cannot publish a Worker.
 
-That covers **storage** and not **deploy**. R2 S3 keys cannot publish a Worker;
-that needs a Cloudflare API token with `Workers Scripts:Edit` and
-`Workers R2 Storage:Edit`. So one of:
+With that token available to the environment as `CLOUDFLARE_API_TOKEN`, plus
+`CLOUDFLARE_ACCOUNT_ID`:
 
-1. **Preferred** — a CF API token (dashboard, My Profile → API Tokens, two
-   minutes). Then `wrangler r2 bucket create vbt-reports && wrangler deploy`.
-   Isolated from the naseyma production box, free tier, own budget.
-2. Reuse `naseyma-backups` under a `vibertemis-reports/` prefix if the scoped
-   key also permits writes there. Still needs the API token for the Worker
-   itself.
-3. **No new credential at all** — run the ingest service on the existing VPS
-   behind the nginx already there (`naseyma/infra/nginx/nginx.conf`), writing
-   to R2 with the S3 keys it already holds. Works today, but puts a public
-   unauthenticated endpoint on the production box, which option 1 avoids.
+```
+wrangler r2 bucket create vbt-reports
+wrangler deploy
+```
+
+Both values live in a local `.env`, which `.gitignore` excludes along with
+`.dev.vars`. No credential, endpoint secret, or account identifier belongs in
+a committed file — this repository is public.
 
 Everything else is built and tested regardless; deploy is the last step.
 
