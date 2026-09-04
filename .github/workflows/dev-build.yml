@@ -251,6 +251,25 @@ jobs:
           qmake6 ../../tests/autoupdate/autoupdate.pro
           make -j"$(sysctl -n hw.logicalcpu 2>/dev/null || nproc)"
           QT_QPA_PLATFORM=offscreen ./tst_autoupdate
+
+      - name: Build and run diagnostics tests
+        run: |
+          # The diagnostics test exercises the production gzipCompress()
+          # private helper and validates the output with the system gzip
+          # decoder. It must compile on every platform the main app
+          # targets so a future regression that re-introduces a zlib
+          # dependency is caught here. We do NOT link zlib; the suite
+          # uses system gzip -d -c instead.
+          export PATH="$Qt6_DIR/bin:$PATH"
+          if ! command -v gzip >/dev/null 2>&1; then
+            echo "::error::gzip binary is required on PATH for diagnostics tests."
+            exit 1
+          fi
+          mkdir -p build/tests-diagnosticreporter
+          cd build/tests-diagnosticreporter
+          qmake6 ../../tests/diagnosticreporter/diagnosticreporter.pro
+          make -j"$(sysctl -n hw.logicalcpu 2>/dev/null || nproc)"
+          QT_QPA_PLATFORM=offscreen ./tst_diagnosticreporter
   build-windows-x64-portable:
     name: Windows x64 Portable Build
     needs: setup-version

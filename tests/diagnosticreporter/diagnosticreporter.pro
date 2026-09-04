@@ -6,10 +6,6 @@ DEFINES += VERSION_STR=\\\"0.6.7\\\"
 DEFINES += VIBERTEMIS_BUILD_COMMIT=\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\"
 DEFINES += VBT_DIAG_ENDPOINT=\\\"http://127.0.0.1:1/v1/report\\\"
 
-unix:!macx {
-    LIBS += -lz
-}
-
 TEMPLATE = app
 TARGET = tst_diagnosticreporter
 

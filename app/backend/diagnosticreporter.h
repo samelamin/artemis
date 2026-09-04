@@ -17,6 +17,12 @@ class DiagnosticReporter : public QObject
     Q_PROPERTY(QString reportId READ reportId NOTIFY reportIdChanged)
     Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY errorChanged)
 
+    // Friend access is the smallest possible change that lets the
+    // diagnostics test suite exercise the actual private production
+    // compressor directly, instead of inferring its behavior from the
+    // bytes that sendReport uploads. The public surface is unchanged.
+    friend class DiagnosticReporterTest;
+
 public:
     enum State {
         Idle,

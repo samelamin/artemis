@@ -590,8 +590,6 @@ DEPENDPATH += $$PWD/../h264bitstream/h264bitstream
 }
 
 unix:!macx: {
-    LIBS += -lz
-
     isEmpty(PREFIX) {
         PREFIX = /usr/local
     }
