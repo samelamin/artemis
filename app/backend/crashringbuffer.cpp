@@ -18,6 +18,12 @@ constexpr std::size_t kSlotCapacity = kCapacity;
 alignas(64) char s_Buffer[kSlotCapacity] = {};
 std::atomic<std::size_t> s_WriteIndex{0};
 
+// True once the buffer has been written past its own length at least once.
+// Before that point, only [0, s_WriteIndex) holds real data — the rest of
+// s_Buffer is still its zero-initialized padding, and snapshot()/
+// snapshotToFd() must not read it as if it were log content.
+std::atomic<bool> s_Wrapped{false};
+
 std::atomic_flag s_Spinlock = ATOMIC_FLAG_INIT;
 
 std::atomic<bool> s_Crashing{false};
@@ -59,6 +65,9 @@ void append(const QString& message)
     if (firstSpan < n) {
         std::memcpy(s_Buffer, utf8.constData() + firstSpan, n - firstSpan);
     }
+    if (head + n >= kSlotCapacity) {
+        s_Wrapped.store(true, std::memory_order_release);
+    }
     s_WriteIndex.store((head + n) % kSlotCapacity, std::memory_order_release);
 
     s_Spinlock.clear(std::memory_order_release);
@@ -82,13 +91,22 @@ std::size_t snapshot(char* outBuffer, std::size_t outBufferSize)
 
     // The crash handler must never take the spinlock or call anything that
     // can block. A best-effort, possibly-torn snapshot is fine and expected.
-    //
+    const std::size_t head = s_WriteIndex.load(std::memory_order_acquire);
+    const bool wrapped = s_Wrapped.load(std::memory_order_acquire);
+
+    if (!wrapped) {
+        // The buffer has never been written past its own length. Only
+        // [0, head) holds real data; the rest of s_Buffer is still its
+        // zero-initialized padding and must not be copied out.
+        const std::size_t copied = std::min<std::size_t>(head, outBufferSize);
+        std::memcpy(outBuffer, s_Buffer, copied);
+        return copied;
+    }
+
     // The buffer is logically circular starting from s_WriteIndex (the next
     // write position) and running for kSlotCapacity bytes, wrapping around.
     // Copy in at most two contiguous runs so the wrap is handled without
     // building a std::string or QByteArray of arbitrary size in the handler.
-    const std::size_t head = s_WriteIndex.load(std::memory_order_acquire);
-
     const std::size_t firstSpan = std::min<std::size_t>(kSlotCapacity - head,
                                                        outBufferSize);
     std::memcpy(outBuffer, s_Buffer + head, firstSpan);
@@ -115,6 +133,14 @@ std::size_t snapshotToFd(int fd)
     // (kAltStackSize is also 64 KB), which is the exact case sigaltstack
     // exists to survive.
     const std::size_t head = s_WriteIndex.load(std::memory_order_acquire);
+    const bool wrapped = s_Wrapped.load(std::memory_order_acquire);
+
+    if (!wrapped) {
+        // Only [0, head) holds real data — see snapshot() above for why.
+        ssize_t w = ::write(fd, s_Buffer, head);
+        (void)w;
+        return head;
+    }
 
     const std::size_t firstSpan = kSlotCapacity - head;
     ssize_t w1 = ::write(fd, s_Buffer + head, firstSpan);

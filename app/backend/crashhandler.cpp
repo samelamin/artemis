@@ -42,11 +42,12 @@ QString s_CrashPath;
 constexpr std::size_t kAltStackSize = 64 * 1024;
 alignas(16) char s_AltStackMemory[kAltStackSize];
 
-// In-handler frame buffer. Fixed-size so backtrace() does not allocate.
-// Pre-warmed at install time so the in-handler call does not hit the
-// dynamic loader lock or first-call allocation.
+// Max stack frames captured per crash. Fixed so backtrace() does not
+// allocate. The frame buffer itself is a local inside handleSignal() (not
+// a global) — see the "Known limitations" note in
+// docs/plans/2026-09-04-diagnostic-reports.md for why it isn't a
+// thread-local either.
 constexpr int kMaxFrames = 64;
-void* s_FrameBuffer[kMaxFrames];
 
 // Compile-time constants for the build identity. Surface real values; the
 // version and commit are defined for every build in app/app.pro.
@@ -104,7 +105,17 @@ void writeString(int fd, const char* s)
     if (s == nullptr) {
         return;
     }
-    ssize_t written = ::write(fd, s, std::strlen(s));
+    // std::strlen() is not in the strict POSIX async-signal-safe function
+    // list. Walk the bytes ourselves instead of relying on it inside a
+    // signal handler. Bounded so a corrupt/non-terminated pointer cannot
+    // spin forever; every real caller in this file (build id, version,
+    // commit, and the fixed phrase literals) is far under this bound.
+    constexpr std::size_t kMaxLen = 4096;
+    std::size_t len = 0;
+    while (len < kMaxLen && s[len] != '\0') {
+        len++;
+    }
+    ssize_t written = ::write(fd, s, len);
     (void)written;
 }
 
@@ -336,12 +347,21 @@ void handleSignal(int sig, siginfo_t* info, void* /*ucontext*/)
     writeString(s_CrashFd, "\n");
 
     writeString(s_CrashFd, "frames:\n");
-    // backtrace() was pre-warmed at install time and uses the stack-local
-    // s_FrameBuffer, so it does not allocate.
-    const int nFrames = ::backtrace(s_FrameBuffer, kMaxFrames);
+    void* frameBuffer[kMaxFrames];
+    // backtrace() was pre-warmed at install time, so this call does not
+    // allocate. It is still not strictly async-signal-safe on glibc (it can
+    // take the dynamic loader lock), which could deadlock the handler if
+    // the crashing thread already held that lock. alarm() is itself
+    // async-signal-safe; arm a 5-second watchdog immediately before the
+    // call and disarm it immediately after, so a deadlocked backtrace()
+    // is killed by SIGALRM's default action (process termination) instead
+    // of hanging the process with a half-written crash file forever.
+    ::alarm(5);
+    const int nFrames = ::backtrace(frameBuffer, kMaxFrames);
+    ::alarm(0);
     for (int i = 0; i < nFrames; i++) {
         writeHex(s_CrashFd,
-                 reinterpret_cast<unsigned long long>(s_FrameBuffer[i]));
+                 reinterpret_cast<unsigned long long>(frameBuffer[i]));
         writeString(s_CrashFd, "\n");
     }
 
@@ -391,6 +411,17 @@ void install()
 
     // Install the alternate signal stack so a stack-overflow SIGSEGV can
     // still run the handler.
+    //
+    // Known limitation: sigaltstack() is inherently per-thread (a
+    // POSIX/glibc property, not something this call can work around). This
+    // only installs the alt-stack for the thread that calls install() (the
+    // main thread). A stack overflow on any other thread — including Qt's
+    // internal thread pools, which are not easily reachable to call
+    // sigaltstack() on individually — will not have an alt-stack available,
+    // and the handler may fail to run for that specific case. Non-overflow
+    // signals (SIGABRT, SIGBUS, SIGFPE, SIGILL, and SIGSEGV from any cause
+    // other than stack overflow) are handled correctly on every thread
+    // regardless of which thread installed the alt-stack.
     stack_t alt{};
     alt.ss_sp = s_AltStackMemory;
     alt.ss_size = kAltStackSize;
@@ -400,8 +431,13 @@ void install()
     }
 
     // Pre-warm the unwinder so the in-handler call does not hit the
-    // dynamic loader lock or first-call allocation. Throw the result away.
-    ::backtrace(s_FrameBuffer, kMaxFrames);
+    // dynamic loader lock or first-call allocation. Uses its own
+    // throwaway local — the in-handler call in handleSignal() has its own
+    // separate local frame buffer (not a shared global, so concurrent or
+    // nested crashes on different threads cannot corrupt each other's
+    // frame data).
+    void* warmupFrameBuffer[kMaxFrames];
+    ::backtrace(warmupFrameBuffer, kMaxFrames);
 
     // Extract this executable's NT_GNU_BUILD_ID now so the handler only
     // has to write() a precomputed hex string.

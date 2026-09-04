@@ -14,15 +14,32 @@ private slots:
     void redactsMacAddress();
     void dropsUrlQueryString();
     void redactsServerinfoXmlBody();
+    void redactsRootXmlWrapper();
     void redactsApplistXmlBody();
     void redactsUuid();
     void redactsClientUniqueId();
     void replacesPcHostName();
+    void redactsClipboardConnectedTo();
+    void redactsHasNoMacAddress();
+    void redactsIsAlreadyOnline();
+    void redactsSentWolPacket();
+    void redactsStartingOtpPairingFor();
+    void redactsNetworkInterfaceName();
     void replacesDiscordUsername();
+    void redactsOtpPin();
+    void redactsOtpPassphrase();
+    void redactsOtpGeneratedHash();
+    void redactsOtpSalt();
+    void redactsOtpHashForPinLine();
     void redactsHomePath();
+    void redactsWindowsUserPath();
+    void redactsMacUserPath();
     void redactsConfigPath();
     void redactsPemBlock();
     void redactsBearerToken();
+    void redactsUrlHostDotLocal();
+    void redactsUrlHostBareHostname();
+    void redactsUrlHostIpLiteral();
     void replacesAppNameInKnownPhrasing();
 
     void preservesGpuString();
@@ -127,6 +144,22 @@ void LogScrubberTest::redactsServerinfoXmlBody()
              qPrintable(QStringLiteral("MAC inside serverinfo survived: ") + out));
 }
 
+void LogScrubberTest::redactsRootXmlWrapper()
+{
+    const QString input = QStringLiteral(
+        "getServerInfo response: <root status_code=\"200\"><hostname>BedroomPC</hostname></root>");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("BedroomPC")),
+             qPrintable(QStringLiteral("root XML body survived: ") + out));
+    QVERIFY(out.contains(QStringLiteral("<root>[REDACTED]</root>")));
+
+    const QString inputUpper = QStringLiteral(
+        "getServerInfo response: <ROOT><hostname>BedroomPC</hostname></ROOT>");
+    const QString outUpper = scrubOne(inputUpper);
+    QVERIFY2(!outUpper.contains(QStringLiteral("BedroomPC")),
+             qPrintable(QStringLiteral("uppercase ROOT XML body survived: ") + outUpper));
+}
+
 void LogScrubberTest::redactsApplistXmlBody()
 {
     const QString input = QStringLiteral(
@@ -198,6 +231,64 @@ void LogScrubberTest::replacesPcHostName()
              qPrintable(QStringLiteral("Expected '<HOST> is now online at'. Got: ") + out2));
 }
 
+void LogScrubberTest::redactsClipboardConnectedTo()
+{
+    const QString input = QStringLiteral(
+        "ClipboardManager: Connected to \"Living-Room-PC\"");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("Living-Room-PC")),
+             qPrintable(QStringLiteral("Host name survived: ") + out));
+    QVERIFY(out.contains(QStringLiteral("<HOST>")));
+}
+
+void LogScrubberTest::redactsHasNoMacAddress()
+{
+    const QString input = QStringLiteral("BedroomPC has no MAC address stored");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("BedroomPC")),
+             qPrintable(QStringLiteral("Host name survived: ") + out));
+    QVERIFY(out.contains(QStringLiteral("<HOST>")));
+}
+
+void LogScrubberTest::redactsIsAlreadyOnline()
+{
+    const QString input = QStringLiteral("BedroomPC is already online");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("BedroomPC")),
+             qPrintable(QStringLiteral("Host name survived: ") + out));
+    QVERIFY(out.contains(QStringLiteral("<HOST>")));
+}
+
+void LogScrubberTest::redactsSentWolPacket()
+{
+    const QString input = QStringLiteral(
+        "Sent WoL packet to BedroomPC via 192.168.1.5:9");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("BedroomPC")),
+             qPrintable(QStringLiteral("Host name survived: ") + out));
+    QVERIFY(out.contains(QStringLiteral("<HOST>")));
+}
+
+void LogScrubberTest::redactsStartingOtpPairingFor()
+{
+    const QString input = QStringLiteral(
+        "PendingOTPPairingTask: Starting OTP pairing task for BedroomPC");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("BedroomPC")),
+             qPrintable(QStringLiteral("Host name survived: ") + out));
+    QVERIFY(out.contains(QStringLiteral("<HOST>")));
+}
+
+void LogScrubberTest::redactsNetworkInterfaceName()
+{
+    const QString input = QStringLiteral(
+        "Found matching interface: eth0 aa:bb:cc:dd:ee:ff QFlags(...)");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("eth0")),
+             qPrintable(QStringLiteral("Interface name survived: ") + out));
+    QVERIFY(out.contains(QStringLiteral("<HOST>")));
+}
+
 void LogScrubberTest::replacesDiscordUsername()
 {
     const QString input = QStringLiteral(
@@ -205,8 +296,59 @@ void LogScrubberTest::replacesDiscordUsername()
     const QString out = scrubOne(input);
     QVERIFY2(!out.contains(QStringLiteral("discorduser#1234")),
              qPrintable(QStringLiteral("Discord username survived: ") + out));
-    QVERIFY2(out.contains(QStringLiteral("<USER>")),
-             qPrintable(QStringLiteral("Expected <USER> placeholder. Got: ") + out));
+    QVERIFY(out.contains(QStringLiteral("<USER>")));
+}
+
+void LogScrubberTest::redactsOtpPin()
+{
+    const QString input = QStringLiteral(
+        "PendingOTPPairingTask: PIN from user: 1234");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("1234")),
+             qPrintable(QStringLiteral("PIN survived: ") + out));
+    QVERIFY(out.contains(QStringLiteral("[REDACTED]")));
+}
+
+void LogScrubberTest::redactsOtpPassphrase()
+{
+    const QString input = QStringLiteral(
+        "PendingOTPPairingTask: Passphrase from user: correcthorsebattery");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("correcthorsebattery")),
+             qPrintable(QStringLiteral("Passphrase survived: ") + out));
+    QVERIFY(out.contains(QStringLiteral("[REDACTED]")));
+}
+
+void LogScrubberTest::redactsOtpGeneratedHash()
+{
+    const QString input = QStringLiteral(
+        "PendingOTPPairingTask: Generated OTP hash: DEADBEEFCAFEF00D");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("DEADBEEFCAFEF00D")),
+             qPrintable(QStringLiteral("OTP hash survived: ") + out));
+    QVERIFY(out.contains(QStringLiteral("[REDACTED]")));
+}
+
+void LogScrubberTest::redactsOtpSalt()
+{
+    const QString input = QStringLiteral(
+        "PendingOTPPairingTask: Using salt: abc123def456");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("abc123def456")),
+             qPrintable(QStringLiteral("Salt survived: ") + out));
+    QVERIFY(out.contains(QStringLiteral("[REDACTED]")));
+}
+
+void LogScrubberTest::redactsOtpHashForPinLine()
+{
+    const QString input = QStringLiteral(
+        "OTPPairingManager: Generated OTP hash for PIN: 9876 Salt: fedcba");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("9876")),
+             qPrintable(QStringLiteral("PIN survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("fedcba")),
+             qPrintable(QStringLiteral("Salt survived: ") + out));
+    QVERIFY(out.contains(QStringLiteral("[REDACTED]")));
 }
 
 void LogScrubberTest::redactsHomePath()
@@ -224,6 +366,33 @@ void LogScrubberTest::redactsHomePath()
              qPrintable(QStringLiteral("~/ survived: ") + out));
     QVERIFY2(out.contains(QStringLiteral("<HOME>")),
              qPrintable(QStringLiteral("Expected <HOME> placeholder. Got: ") + out));
+}
+
+void LogScrubberTest::redactsWindowsUserPath()
+{
+    const QString input1 = QStringLiteral(
+        R"(Loading config from C:\Users\alice\AppData\Roaming\Artemis\config.ini)");
+    const QString out1 = scrubOne(input1);
+    QVERIFY2(!out1.contains(QStringLiteral("alice")),
+             qPrintable(QStringLiteral("Windows username survived: ") + out1));
+    QVERIFY(out1.contains(QStringLiteral("<HOME>")));
+
+    const QString input2 = QStringLiteral(
+        "Loading config from D:/Users/bob/AppData/Roaming/Artemis/config.ini");
+    const QString out2 = scrubOne(input2);
+    QVERIFY2(!out2.contains(QStringLiteral("bob")),
+             qPrintable(QStringLiteral("Windows username survived: ") + out2));
+    QVERIFY(out2.contains(QStringLiteral("<HOME>")));
+}
+
+void LogScrubberTest::redactsMacUserPath()
+{
+    const QString input = QStringLiteral(
+        "Loading config from /Users/carol/Library/Application Support/Artemis/config.ini");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("carol")),
+             qPrintable(QStringLiteral("macOS username survived: ") + out));
+    QVERIFY(out.contains(QStringLiteral("<HOME>")));
 }
 
 void LogScrubberTest::redactsConfigPath()
@@ -274,6 +443,36 @@ void LogScrubberTest::redactsBearerToken()
              qPrintable(QStringLiteral("'Bearer' scheme label survived: ") + out));
     QVERIFY2(out.contains(QStringLiteral("[REDACTED]")),
              qPrintable(QStringLiteral("Expected [REDACTED] placeholder. Got: ") + out));
+}
+
+void LogScrubberTest::redactsUrlHostDotLocal()
+{
+    const QString input = QStringLiteral(
+        "Connecting to http://desktop-my-pc.local:47989/serverinfo");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("desktop-my-pc.local")),
+             qPrintable(QStringLiteral(".local hostname survived: ") + out));
+    QVERIFY(out.contains(QStringLiteral("http://<HOST>:47989/serverinfo")));
+}
+
+void LogScrubberTest::redactsUrlHostBareHostname()
+{
+    const QString input = QStringLiteral(
+        "Connecting to https://bedroompc:47984/pair");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("bedroompc")),
+             qPrintable(QStringLiteral("Bare hostname survived: ") + out));
+    QVERIFY(out.contains(QStringLiteral("https://<HOST>:47984/pair")));
+}
+
+void LogScrubberTest::redactsUrlHostIpLiteral()
+{
+    const QString input = QStringLiteral(
+        "Connecting to http://192.168.1.42:47989/serverinfo");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("192.168.1.42")),
+             qPrintable(QStringLiteral("IP-literal host survived: ") + out));
+    QVERIFY(out.contains(QStringLiteral("http://<HOST>:47989/serverinfo")));
 }
 
 void LogScrubberTest::replacesAppNameInKnownPhrasing()

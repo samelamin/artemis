@@ -958,8 +958,8 @@ qDebug() << "PendingOTPPairingTask: Generated AES key from salt+PIN";
             NvHTTP http(m_Computer);
             
             qDebug() << "PendingOTPPairingTask: Starting Apollo OTP pairing";
-            qDebug() << "PendingOTPPairingTask: PIN from user:" << m_Pin;
-            qDebug() << "PendingOTPPairingTask: Passphrase from user:" << m_Passphrase;
+            qDebug() << "PendingOTPPairingTask: PIN received from user";
+            qDebug() << "PendingOTPPairingTask: Passphrase received from user";
             
             // Generate a 16-byte salt
             QByteArray saltBytes(16, 0);
@@ -974,8 +974,8 @@ qDebug() << "PendingOTPPairingTask: Generated AES key from salt+PIN";
             hash.addData(plainText.toUtf8());
             QString otpHash = hash.result().toHex().toUpper();
             
-            qDebug() << "PendingOTPPairingTask: Generated OTP hash:" << otpHash;
-            qDebug() << "PendingOTPPairingTask: Using salt:" << saltStr;
+            qDebug() << "PendingOTPPairingTask: Generated OTP hash";
+            qDebug() << "PendingOTPPairingTask: Generated pairing salt";
             
             // Build the pairing parameters - use consistent device name
             QString deviceName = QSysInfo::machineHostName();

@@ -1,7 +1,28 @@
+import {
+  checkAndIncrementBudget,
+  type BudgetCheckResult,
+  type BudgetState,
+} from "./dailyBudget";
+
 export interface Env {
   REPORTS_BUCKET: R2Bucket;
-  DAILY_BUDGET_KV: KVNamespace;
+  DAILY_BUDGET_DO: DurableObjectNamespace;
   REPORT_RATE_LIMITER: RateLimit;
+}
+
+// DurableObjectNamespace is used untyped above (no generic) because the
+// generic form requires the DO class to be RPC-branded, which only happens
+// by extending the cloudflare:workers DurableObject base class — and we
+// deliberately do not extend that (see DailyBudgetCounter below). This
+// interface describes the one custom RPC method callers actually invoke on
+// the stub; the DurableObjectStub returned by .get() is cast to it below.
+interface DailyBudgetStub {
+  checkAndIncrement(
+    day: string,
+    incomingBytes: number,
+    capBytes: number,
+    capRequests: number,
+  ): Promise<BudgetCheckResult>;
 }
 
 const CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -14,9 +35,37 @@ const MAX_DAILY_REQUESTS = 4000;
 
 const REPORT_PATH = "/v1/report";
 
-interface BudgetState {
-  bytes: number;
-  requests: number;
+// Durable Object that owns the daily budget counter. A plain class (does
+// NOT extend the cloudflare:workers DurableObject base) — see the note at
+// the top of this prompt / Wave 7 notes for why. All instances of this
+// class share one logical counter per UTC day via a single, fixed DO id
+// (see idFromName("global") in handlePutReport below), so storage grows by
+// one small BudgetState row per calendar day — negligible, no expiry
+// needed.
+export class DailyBudgetCounter {
+  private readonly state: DurableObjectState;
+
+  constructor(state: DurableObjectState, _env: Env) {
+    this.state = state;
+  }
+
+  async checkAndIncrement(
+    day: string,
+    incomingBytes: number,
+    capBytes: number,
+    capRequests: number,
+  ): Promise<BudgetCheckResult> {
+    return checkAndIncrementBudget(
+      {
+        get: (key) => this.state.storage.get<BudgetState>(key),
+        put: (key, value) => this.state.storage.put<BudgetState>(key, value),
+      },
+      day,
+      incomingBytes,
+      capBytes,
+      capRequests,
+    );
+  }
 }
 
 export function generateReportId(): string {
@@ -43,63 +92,11 @@ export function objectKeyFor(id: string, version: string, now: Date): string {
   return `reports/${datePart}/${versionPart}/${id}.gz`;
 }
 
-export function budgetKeyFor(now: Date): string {
+export function dayKeyFor(now: Date): string {
   const yyyy = now.getUTCFullYear();
   const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
   const dd = String(now.getUTCDate()).padStart(2, "0");
-  return `budget:${yyyy}-${mm}-${dd}`;
-}
-
-export async function checkDailyBudget(
-  kv: KVNamespace,
-  incomingBytes: number,
-  now: Date = new Date(),
-): Promise<{ allowed: boolean; bytesToday: number; requestsToday: number }> {
-  const key = budgetKeyFor(now);
-  const raw = await kv.get(key);
-  const state = parseBudgetState(raw);
-  const projectedBytes = state.bytes + incomingBytes;
-  const projectedRequests = state.requests + 1;
-  const allowed =
-    projectedBytes <= MAX_DAILY_BYTES && projectedRequests <= MAX_DAILY_REQUESTS;
-  return {
-    allowed,
-    bytesToday: state.bytes,
-    requestsToday: state.requests,
-  };
-}
-
-export async function recordDailyUsage(
-  kv: KVNamespace,
-  bytes: number,
-  now: Date = new Date(),
-): Promise<void> {
-  const key = budgetKeyFor(now);
-  const raw = await kv.get(key);
-  const state = parseBudgetState(raw);
-  state.bytes += bytes;
-  state.requests += 1;
-  await kv.put(key, JSON.stringify(state), { expirationTtl: 172800 });
-}
-
-function parseBudgetState(raw: string | null): BudgetState {
-  if (raw === null) {
-    return { bytes: 0, requests: 0 };
-  }
-  try {
-    const parsed = JSON.parse(raw) as Partial<BudgetState>;
-    const bytes =
-      typeof parsed.bytes === "number" && Number.isFinite(parsed.bytes)
-        ? parsed.bytes
-        : 0;
-    const requests =
-      typeof parsed.requests === "number" && Number.isFinite(parsed.requests)
-        ? Math.max(0, Math.floor(parsed.requests))
-        : 0;
-    return { bytes, requests };
-  } catch {
-    return { bytes: 0, requests: 0 };
-  }
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 function jsonResponse(body: unknown, status: number): Response {
@@ -149,7 +146,14 @@ export async function handlePutReport(
     return jsonResponse({ error: "body too large" }, 413);
   }
 
-  const budget = await checkDailyBudget(env.DAILY_BUDGET_KV, buf.byteLength, now);
+  const doId = env.DAILY_BUDGET_DO.idFromName("global");
+  const budgetStub = env.DAILY_BUDGET_DO.get(doId) as unknown as DailyBudgetStub;
+  const budget = await budgetStub.checkAndIncrement(
+    dayKeyFor(now),
+    buf.byteLength,
+    MAX_DAILY_BYTES,
+    MAX_DAILY_REQUESTS,
+  );
   if (!budget.allowed) {
     return jsonResponse({ error: "daily budget exceeded" }, 503);
   }
@@ -159,7 +163,6 @@ export async function handlePutReport(
   const key = objectKeyFor(id, version, now);
 
   await env.REPORTS_BUCKET.put(key, buf);
-  await recordDailyUsage(env.DAILY_BUDGET_KV, buf.byteLength, now);
 
   return jsonResponse({ id }, 200);
 }

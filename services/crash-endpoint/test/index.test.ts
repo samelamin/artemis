@@ -3,26 +3,87 @@ import {
   handlePutReport,
   generateReportId,
   objectKeyFor,
-  budgetKeyFor,
+  dayKeyFor,
   type Env,
 } from "../src/index";
 import worker from "../src/index";
+import {
+  checkAndIncrementBudget,
+  type BudgetState,
+  type BudgetCheckResult,
+} from "../src/dailyBudget";
 
-class FakeKV {
-  store = new Map<string, string>();
-  ttls = new Map<string, number>();
-  async get(key: string): Promise<string | null> {
-    return this.store.get(key) ?? null;
+// In-memory storage backing FakeDailyBudgetStub. get()/put() are plain,
+// unqueued async methods — the atomicity guarantee lives one level up, in
+// FakeDailyBudgetStub.checkAndIncrement's runExclusive() wrapper below,
+// which serializes the *entire* get-compute-put operation as one unit.
+// (An earlier version of this fake queued get() and put() individually,
+// which does not model the real thing: two concurrent operations could
+// still interleave as A.get, B.get, A.put, B.put, with both reading the
+// same pre-increment state before either writes. The Durable Object
+// "input gate" this fake exists to mirror defers a whole incoming RPC
+// invocation — not individual storage calls — until the previous one
+// finishes, which is why the serialization boundary belongs around the
+// whole operation.)
+class FakeSerializedStorage {
+  private map = new Map<string, BudgetState>();
+  private queue: Promise<unknown> = Promise.resolve();
+
+  // Runs fn() exclusively with respect to every other call queued through
+  // this same instance. Models the Durable Object "input gate": the whole
+  // RPC invocation (get, compute, put, with no other yielding I/O in
+  // between) runs to completion before the next queued invocation starts.
+  runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const result = this.queue.then(fn);
+    this.queue = result.catch(() => undefined);
+    return result;
   }
-  async put(
-    key: string,
-    value: string,
-    options?: { expirationTtl?: number },
-  ): Promise<void> {
-    this.store.set(key, value);
-    if (options?.expirationTtl !== undefined) {
-      this.ttls.set(key, options.expirationTtl);
-    }
+
+  async get(key: string): Promise<BudgetState | undefined> {
+    return this.map.get(key);
+  }
+
+  async put(key: string, value: BudgetState): Promise<void> {
+    this.map.set(key, value);
+  }
+}
+
+class FakeDailyBudgetStub {
+  storage = new FakeSerializedStorage();
+
+  async checkAndIncrement(
+    day: string,
+    incomingBytes: number,
+    capBytes: number,
+    capRequests: number,
+  ): Promise<BudgetCheckResult> {
+    return this.storage.runExclusive(() =>
+      checkAndIncrementBudget(
+        this.storage,
+        day,
+        incomingBytes,
+        capBytes,
+        capRequests,
+      ),
+    );
+  }
+
+  // Test helper only — seeds the day's counter directly, the way
+  // globalDailyBudget tests need to start "already near the cap". Not
+  // routed through runExclusive: it runs before any concurrent traffic
+  // exists in every test that uses it.
+  async seed(day: string, state: BudgetState): Promise<void> {
+    await this.storage.put(`budget:${day}`, state);
+  }
+}
+
+class FakeDailyBudgetNamespace {
+  stub = new FakeDailyBudgetStub();
+  idFromName(_name: string): string {
+    return "global";
+  }
+  get(_id: string): FakeDailyBudgetStub {
+    return this.stub;
   }
 }
 
@@ -68,21 +129,21 @@ class FakeR2Bucket {
 
 interface TestEnv {
   env: Env;
-  kv: FakeKV;
+  budgetDO: FakeDailyBudgetNamespace;
   limiter: FakeRateLimiter;
   r2: FakeR2Bucket;
 }
 
 function makeEnv(): TestEnv {
-  const kv = new FakeKV();
+  const budgetDO = new FakeDailyBudgetNamespace();
   const limiter = new FakeRateLimiter();
   const r2 = new FakeR2Bucket();
   const env: Env = {
     REPORTS_BUCKET: r2 as unknown as R2Bucket,
-    DAILY_BUDGET_KV: kv as unknown as KVNamespace,
+    DAILY_BUDGET_DO: budgetDO as unknown as DurableObjectNamespace,
     REPORT_RATE_LIMITER: limiter as unknown as RateLimit,
   };
-  return { env, kv, limiter, r2 };
+  return { env, budgetDO, limiter, r2 };
 }
 
 const NOW = new Date("2026-09-04T12:00:00Z");
@@ -244,10 +305,10 @@ describe("handler", () => {
   });
 
   it("globalDailyBudget: bytes already at cap returns 503 and does not call R2", async () => {
-    ctx.kv.store.set(
-      budgetKeyFor(NOW),
-      JSON.stringify({ bytes: 8 * 1024 * 1024 * 1024, requests: 1 }),
-    );
+    await ctx.budgetDO.stub.seed(dayKeyFor(NOW), {
+      bytes: 8 * 1024 * 1024 * 1024,
+      requests: 1,
+    });
     const req = new Request("https://example.com/v1/report", {
       method: "PUT",
       body: new Uint8Array([1, 2, 3]),
@@ -258,10 +319,7 @@ describe("handler", () => {
   });
 
   it("globalDailyBudget: requests already at cap returns 503 and does not call R2", async () => {
-    ctx.kv.store.set(
-      budgetKeyFor(NOW),
-      JSON.stringify({ bytes: 0, requests: 4000 }),
-    );
+    await ctx.budgetDO.stub.seed(dayKeyFor(NOW), { bytes: 0, requests: 4000 });
     const req = new Request("https://example.com/v1/report", {
       method: "PUT",
       body: new Uint8Array([1, 2, 3]),
@@ -310,7 +368,7 @@ describe("handler", () => {
     expect(obj.key.endsWith(".gz")).toBe(true);
   });
 
-  it("records daily usage in KV after a successful upload", async () => {
+  it("records daily usage after a successful upload", async () => {
     const payload = new Uint8Array([1, 2, 3, 4, 5]);
     const req = new Request("https://example.com/v1/report", {
       method: "PUT",
@@ -318,22 +376,12 @@ describe("handler", () => {
       body: payload,
     });
     await handlePutReport(req, ctx.env, NOW);
-    const stored = ctx.kv.store.get(budgetKeyFor(NOW));
+    const stored = await ctx.budgetDO.stub.storage.get(
+      `budget:${dayKeyFor(NOW)}`,
+    );
     expect(stored).not.toBeUndefined();
-    const parsed = JSON.parse(stored!) as { bytes: number; requests: number };
-    expect(parsed.bytes).toBe(5);
-    expect(parsed.requests).toBe(1);
-  });
-
-  it("records daily usage in KV with a 172800s expirationTtl", async () => {
-    const payload = new Uint8Array([1, 2, 3, 4, 5]);
-    const req = new Request("https://example.com/v1/report", {
-      method: "PUT",
-      headers: { "X-Vbt-Ver": "1.0.0" },
-      body: payload,
-    });
-    await handlePutReport(req, ctx.env, NOW);
-    expect(ctx.kv.ttls.get(budgetKeyFor(NOW))).toBe(172800);
+    expect(stored!.bytes).toBe(5);
+    expect(stored!.requests).toBe(1);
   });
 
   it("falls back to 'unknown' caller ip when CF-Connecting-IP is absent", async () => {
@@ -343,6 +391,28 @@ describe("handler", () => {
     });
     await handlePutReport(req, ctx.env, NOW);
     expect(ctx.limiter.calls).toEqual([{ key: "unknown" }]);
+  });
+
+  it("atomicBudget: two concurrent requests cannot both pass a budget with room for only one", async () => {
+    const ctx2 = makeEnv();
+    // Seed the request counter one below MAX_DAILY_REQUESTS (4000), so
+    // exactly one more request fits under the cap, not two.
+    await ctx2.budgetDO.stub.seed(dayKeyFor(NOW), { bytes: 0, requests: 3999 });
+
+    const makeReq = () =>
+      new Request("https://example.com/v1/report", {
+        method: "PUT",
+        body: new Uint8Array([1, 2, 3]),
+      });
+
+    const [res1, res2] = await Promise.all([
+      handlePutReport(makeReq(), ctx2.env, NOW),
+      handlePutReport(makeReq(), ctx2.env, NOW),
+    ]);
+
+    const statuses = [res1.status, res2.status].sort();
+    expect(statuses).toEqual([200, 503]);
+    expect(ctx2.r2.objects).toHaveLength(1);
   });
 });
 

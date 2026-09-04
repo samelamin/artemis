@@ -232,6 +232,34 @@ PUT /v1/report
 - `qmake6 && make` clean; existing suites still 43/56/110, 0 failed.
 - No new Flatpak permission required.
 
+## Known limitations
+
+Three accepted tradeoffs, called out explicitly rather than left implicit:
+
+- **`sigaltstack()` is per-thread.** `CrashHandler::install()` installs the
+  alternate signal stack only for the thread that calls it (the main
+  thread). A stack-overflow SIGSEGV on any other thread — including Qt's
+  internal thread pools, which are not easily reachable to install a
+  per-thread alt-stack on individually — will not have an alt-stack
+  available, and the handler may fail to run for that specific case.
+  Non-overflow signals and SIGSEGV from causes other than stack overflow are
+  unaffected and are handled correctly on every thread.
+- **The ring buffer's read is deliberately unsynchronized.** `snapshot()`
+  and `snapshotToFd()` read `CrashRingBuffer`'s shared state without taking
+  its spinlock, and can race with an `append()` on another thread that has
+  not yet observed `setCrashing(true)`. This is an accepted data race, not
+  an oversight: the alternative is a lock acquired inside a signal handler,
+  which can deadlock if the crashing thread already held it. A best-effort,
+  possibly-torn snapshot is preferable to a handler that can hang.
+- **`backtrace()` is not strictly async-signal-safe.** On glibc it can take
+  an internal lock (e.g. the dynamic loader lock) that the crashing thread
+  may already hold. This is bounded, not eliminated: the call is wrapped
+  with a 5-second `alarm()` watchdog (itself async-signal-safe), so a
+  deadlocked `backtrace()` is killed by SIGALRM's default action instead of
+  hanging the process with a half-written crash file. Both reviewers
+  (Codex and Antigravity) independently flagged this as a real, not
+  theoretical, deadlock risk.
+
 ## Deploy
 
 Deployment needs a Cloudflare API token with `Workers Scripts:Edit` and

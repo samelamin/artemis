@@ -128,7 +128,7 @@ QString OTPPairingManager::generateOTPHash(const QString &pin, const QString &sa
     // Convert to hex string (uppercase to match Android)
     QString hexString = result.toHex().toUpper();
     
-    qDebug() << "OTPPairingManager: Generated OTP hash for PIN:" << pin << "Salt:" << salt;
+    qDebug() << "OTPPairingManager: Generated OTP hash";
     
     return hexString;
 }

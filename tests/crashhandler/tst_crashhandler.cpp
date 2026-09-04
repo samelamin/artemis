@@ -17,6 +17,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <vector>
 
 #include "backend/crashhandler.h"
 #include "backend/crashringbuffer.h"
@@ -101,6 +102,8 @@ class CrashHandlerTest : public QObject
 private slots:
     void crashFileCapturesBuildIdFramesMapsAndRingBuffer();
     void installCreatesMissingLogDirectory();
+    void ringBufferSnapshotHasNoNulPaddingBeforeWrap();
+    void ringBufferSnapshotDropsOldestBytesAfterWrap();
 };
 
 void CrashHandlerTest::crashFileCapturesBuildIdFramesMapsAndRingBuffer()
@@ -191,6 +194,44 @@ void CrashHandlerTest::installCreatesMissingLogDirectory()
     QVERIFY2(QDir(logDir).exists(),
              qPrintable(QStringLiteral("install() did not create the log directory: ")
                         + logDir));
+}
+
+void CrashHandlerTest::ringBufferSnapshotHasNoNulPaddingBeforeWrap()
+{
+    const QString marker = QStringLiteral(
+        "RINGBUF_PREWRAP_MARKER_0123456789_0123456789_0123456789_0123");
+    QCOMPARE(marker.size(), 60); // sanity: exactly 60 chars, well under 64 KB
+    CrashRingBuffer::append(marker);
+
+    char out[256] = {};
+    const std::size_t copied = CrashRingBuffer::snapshot(out, sizeof(out));
+
+    const QByteArray got(out, static_cast<int>(copied));
+    QCOMPARE(static_cast<int>(copied), marker.toUtf8().size());
+    QVERIFY2(!got.contains('\0'),
+             "snapshot() returned NUL bytes before the buffer ever wrapped");
+    QCOMPARE(QString::fromUtf8(got), marker);
+}
+
+void CrashHandlerTest::ringBufferSnapshotDropsOldestBytesAfterWrap()
+{
+    // Force a wrap: a single append of exactly kCapacity bytes, on top of
+    // the marker already written by the previous test, guarantees
+    // head + n >= kCapacity.
+    QByteArray fill(static_cast<int>(CrashRingBuffer::kCapacity), 'B');
+    CrashRingBuffer::append(QString::fromLatin1(fill));
+
+    std::vector<char> out(CrashRingBuffer::kCapacity);
+    const std::size_t copied = CrashRingBuffer::snapshot(out.data(), out.size());
+
+    QCOMPARE(copied, CrashRingBuffer::kCapacity);
+    const QByteArray got(out.data(), static_cast<int>(copied));
+    QVERIFY2(!got.contains('\0'),
+             "snapshot() returned NUL bytes after the buffer wrapped");
+    // The pre-wrap marker from the previous test must have been fully
+    // overwritten — it no longer fits once the buffer is entirely 'B's.
+    QVERIFY2(!got.contains("RINGBUF_PREWRAP_MARKER"),
+             "oldest bytes were not dropped after the buffer wrapped");
 }
 
 int main(int argc, char* argv[])
