@@ -5,6 +5,7 @@
 #include <QStandardPaths>
 #include <QSettings>
 #include <QCoreApplication>
+#include <QtGlobal>
 
 QString Path::s_CacheDir;
 QString Path::s_LogDir;
@@ -123,7 +124,13 @@ void Path::initialize(bool portable)
         // QStandardPaths::writableLocation() only computes a path string; it
         // does not create the directory. The caller is responsible for
         // mkpath(".") before opening any file inside s_LogDir.
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
         s_LogDir = QStandardPaths::writableLocation(QStandardPaths::StateLocation);
+#else
+        // Fallback for Qt < 6.7: StateLocation is not available, so use the
+        // per-application local data directory instead.
+        s_LogDir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+#endif
 #else
         s_LogDir = QDir::tempPath();
 #endif

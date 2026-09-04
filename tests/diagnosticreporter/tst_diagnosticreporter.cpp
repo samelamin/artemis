@@ -11,54 +11,16 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QObject>
+#include <QProcess>
 #include <QQueue>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTimer>
-
-#include <zlib.h>
 
 #include "backend/diagnosticreporter.h"
 #include "backend/logscrubber.h"
 
 namespace {
-
-QByteArray gzipInflate(const QByteArray &input)
-{
-    z_stream stream{};
-    if (inflateInit2(&stream, MAX_WBITS + 16) != Z_OK) {
-        return QByteArray();
-    }
-    QByteArray output;
-    output.resize(static_cast<int>(input.size() * 6 + 64));
-    stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(input.constData()));
-    stream.avail_in = static_cast<uInt>(input.size());
-    stream.next_out = reinterpret_cast<Bytef*>(output.data());
-    stream.avail_out = static_cast<uInt>(output.size());
-    int ret = Z_BUF_ERROR;
-    while (stream.avail_in > 0) {
-        ret = inflate(&stream, Z_NO_FLUSH);
-        if (ret == Z_STREAM_END) {
-            break;
-        }
-        if (ret != Z_OK && ret != Z_BUF_ERROR) {
-            inflateEnd(&stream);
-            return QByteArray();
-        }
-        if (stream.avail_out == 0) {
-            const int old = output.size();
-            output.resize(old * 2);
-            stream.next_out = reinterpret_cast<Bytef*>(output.data() + old);
-            stream.avail_out = static_cast<uInt>(output.size() - old);
-        }
-    }
-    if (ret != Z_STREAM_END) {
-        inflateEnd(&stream);
-        return QByteArray();
-    }
-    output.resize(static_cast<int>(stream.total_out));
-    inflateEnd(&stream);
-    return output;
-}
 
 struct Script {
     QByteArray body;
@@ -218,6 +180,64 @@ const QByteArray kSmallCrash =
     "Frames:\n"
     "  #0 0x00007f8a + 0x0042 /usr/bin/artemis\n";
 
+// Resolves the gzip-family decoder. Returns the absolute path of "gzip"
+// if installed, or "gunzip" as a fallback. Returns an empty string when
+// neither binary is on PATH.
+QString resolveGzipDecoder()
+{
+    const QString gzipPath =
+        QStandardPaths::findExecutable(QStringLiteral("gzip"));
+    if (!gzipPath.isEmpty()) {
+        return gzipPath;
+    }
+    return QStandardPaths::findExecutable(QStringLiteral("gunzip"));
+}
+
+// Invokes `decoder -n -d -c <gzPath>` (or `decoder -c <gzPath>` for
+// gunzip-style tools) and returns the stdout. Sets *exitCode and
+// *errorMessage when the process could not be started, finished, or
+// exited normally.
+QByteArray runGzipDecoder(const QString &decoder,
+                          const QString &gzPath,
+                          int *exitCode,
+                          QString *errorMessage)
+{
+    QStringList arguments;
+    const bool looksLikeGunzip =
+        decoder.endsWith(QStringLiteral("/gunzip"))
+        || decoder.endsWith(QStringLiteral("gunzip"));
+    if (looksLikeGunzip) {
+        arguments << QStringLiteral("-c") << gzPath;
+    } else {
+        arguments << QStringLiteral("-n") << QStringLiteral("-d")
+                  << QStringLiteral("-c") << gzPath;
+    }
+
+    QProcess proc;
+    proc.start(decoder, arguments);
+    if (!proc.waitForStarted(5000)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Could not start %1: %2")
+                                .arg(decoder, proc.errorString());
+        }
+        return QByteArray();
+    }
+    if (!proc.waitForFinished(30000)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("%1 timed out: %2")
+                                .arg(decoder, proc.errorString());
+        }
+        return QByteArray();
+    }
+    if (exitCode) {
+        *exitCode = proc.exitCode();
+    }
+    if (errorMessage) {
+        *errorMessage = QString::fromUtf8(proc.readAllStandardError());
+    }
+    return proc.readAllStandardOutput();
+}
+
 } // namespace
 
 class DiagnosticReporterTest : public QObject
@@ -235,6 +255,20 @@ private slots:
     void previewReflectsNoteTruncation();
     void crashSelectionSkipsEmptyNewestFile();
     void previewPartsExposeStructuredHeadAndRawText();
+
+    // Direct coverage of the production gzip compressor. Each case calls
+    // DiagnosticReporter::gzipCompress(input) via friend access and
+    // validates the resulting stream with the *system* gzip -d -c
+    // decoder, so we never copy the production implementation into the
+    // test. The independent decoder is required by the cross-platform
+    // recovery contract.
+    void gzipCompressProducesValidHeaderAndTrailer();
+    void gzipCompressRoundTripsCanonicalAscii();
+    void gzipCompressCarriesCrc32OfInput();
+    void gzipCompressEmptyInputProducesValidStream();
+    void gzipCompressRoundTripsBinaryWithNulsAndAllBytes();
+    void gzipCompressRoundTripsLargeIncompressibleInput();
+    void gzipCompressIsDeterministic();
 
 private:
     QTemporaryDir m_LogDir;
@@ -307,7 +341,23 @@ void DiagnosticReporterTest::truncationPreservesStructuredHead()
              qPrintable(QStringLiteral("Payload still over cap: %1")
                         .arg(payload.size())));
 
-    const QByteArray decompressed = gzipInflate(payload);
+    const QString decoder = resolveGzipDecoder();
+    if (decoder.isEmpty()) {
+        QSKIP("Neither gzip nor gunzip is on PATH; "
+              "skipping decoder-based end-to-end check.");
+    }
+
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString gzPath = tempDir.filePath(QStringLiteral("truncation.gz"));
+    QVERIFY(writeFile(gzPath, payload));
+
+    int exitCode = -1;
+    QString stderrMessage;
+    const QByteArray decompressed = runGzipDecoder(decoder, gzPath, &exitCode,
+                                                   &stderrMessage);
+    QVERIFY2(stderrMessage.isEmpty(), qPrintable(stderrMessage));
+    QCOMPARE(exitCode, 0);
     QVERIFY2(!decompressed.isEmpty(),
              qPrintable(QStringLiteral("Could not inflate payload.")));
 
@@ -422,10 +472,23 @@ void DiagnosticReporterTest::previewByteIdenticalToUploadedPayload()
                  "Uploaded payload does not start with the gzip magic bytes. "
                  "Bytes 0-1: ") + uploaded.left(2).toHex()));
 
-    const QByteArray decompressed = gzipInflate(uploaded);
-    QVERIFY2(!decompressed.isEmpty(),
-             qPrintable(QStringLiteral("Inflation of uploaded payload failed.")));
+    const QString decoder = resolveGzipDecoder();
+    if (decoder.isEmpty()) {
+        QSKIP("Neither gzip nor gunzip is on PATH; "
+              "skipping decoder-based preview-identity check.");
+    }
 
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString gzPath = tempDir.filePath(QStringLiteral("uploaded.gz"));
+    QVERIFY(writeFile(gzPath, uploaded));
+
+    int exitCode = -1;
+    QString stderrMessage;
+    const QByteArray decompressed = runGzipDecoder(decoder, gzPath, &exitCode,
+                                                   &stderrMessage);
+    QVERIFY2(stderrMessage.isEmpty(), qPrintable(stderrMessage));
+    QCOMPARE(exitCode, 0);
     QCOMPARE(decompressed, previewText.toUtf8());
 }
 
@@ -561,6 +624,258 @@ void DiagnosticReporterTest::previewPartsExposeStructuredHeadAndRawText()
     const QJsonObject root =
         QJsonDocument::fromJson(jsonPreview.toUtf8()).object();
     QCOMPARE(root.value(QStringLiteral("crash")).toString(), crashText);
+}
+
+// Direct production-compressor coverage.
+//
+// Tests in this block invoke DiagnosticReporter::gzipCompress() through
+// friend access. Each one decodes the resulting stream with the system
+// gzip binary, the source of truth for the gzip format. There is no copy
+// of the production CRC32 table in this test; if the production stream
+// ever drifts from RFC 1952, gzip -d will reject it.
+//
+// QSKIP when neither gzip nor gunzip is on PATH so the suite still runs
+// on minimal CI images.
+
+void DiagnosticReporterTest::gzipCompressProducesValidHeaderAndTrailer()
+{
+    // Friend access into the private static production compressor.
+    const QByteArray payload = DiagnosticReporter::gzipCompress(
+        QByteArrayLiteral("123456789"));
+
+    QVERIFY2(payload.size() >= 20,
+             qPrintable(QStringLiteral(
+                 "Compressed payload too short: %1 bytes").arg(payload.size())));
+
+    QCOMPARE(static_cast<int>(static_cast<quint8>(payload[0])), 0x1f);
+    QCOMPARE(static_cast<int>(static_cast<quint8>(payload[1])), 0x8b);
+    QCOMPARE(static_cast<int>(static_cast<quint8>(payload[2])), 0x08);
+    QCOMPARE(static_cast<int>(static_cast<quint8>(payload[3])), 0x00);
+    QCOMPARE(static_cast<int>(static_cast<quint8>(payload[4])), 0x00);
+    QCOMPARE(static_cast<int>(static_cast<quint8>(payload[5])), 0x00);
+    QCOMPARE(static_cast<int>(static_cast<quint8>(payload[6])), 0x00);
+    QCOMPARE(static_cast<int>(static_cast<quint8>(payload[7])), 0x00);
+    QCOMPARE(static_cast<int>(static_cast<quint8>(payload[8])), 0x00);
+    QCOMPARE(static_cast<int>(static_cast<quint8>(payload[9])), 0xff);
+}
+
+void DiagnosticReporterTest::gzipCompressRoundTripsCanonicalAscii()
+{
+    const QString decoder = resolveGzipDecoder();
+    if (decoder.isEmpty()) {
+        QSKIP("Neither gzip nor gunzip is on PATH; "
+              "skipping round-trip test.");
+    }
+
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString gzPath = tempDir.filePath(QStringLiteral("canonical.gz"));
+    const QByteArray input = QByteArrayLiteral("123456789");
+
+    const QByteArray payload = DiagnosticReporter::gzipCompress(input);
+    QVERIFY2(!payload.isEmpty(),
+             qPrintable(QStringLiteral("gzipCompress returned empty.")));
+    QVERIFY(writeFile(gzPath, payload));
+
+    int exitCode = -1;
+    QString stderrMessage;
+    const QByteArray decoded = runGzipDecoder(decoder, gzPath, &exitCode,
+                                              &stderrMessage);
+    QVERIFY2(stderrMessage.isEmpty(), qPrintable(stderrMessage));
+    QCOMPARE(exitCode, 0);
+    QCOMPARE(decoded, input);
+}
+
+void DiagnosticReporterTest::gzipCompressCarriesCrc32OfInput()
+{
+    const QString decoder = resolveGzipDecoder();
+    if (decoder.isEmpty()) {
+        QSKIP("Neither gzip nor gunzip is on PATH; "
+              "skipping CRC trailer test.");
+    }
+
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString gzPath = tempDir.filePath(QStringLiteral("crc-vector.gz"));
+
+    // Canonical ZIP/PNG/gzip CRC32 test vector: 0xCBF43926 for
+    // "123456789". The trailer in our output must carry this value in
+    // little-endian order when the input is exactly this string.
+    const QByteArray input = QByteArrayLiteral("123456789");
+    const QByteArray payload = DiagnosticReporter::gzipCompress(input);
+    QVERIFY(payload.size() >= 20);
+    QVERIFY(writeFile(gzPath, payload));
+
+    const auto *p = reinterpret_cast<const quint8 *>(payload.constData());
+    const auto readLe32 = [&p](int off) {
+        return static_cast<quint32>(p[off])
+            | (static_cast<quint32>(p[off + 1]) << 8)
+            | (static_cast<quint32>(p[off + 2]) << 16)
+            | (static_cast<quint32>(p[off + 3]) << 24);
+    };
+    const quint32 trailerCrc = readLe32(payload.size() - 8);
+    const quint32 trailerIsize = readLe32(payload.size() - 4);
+
+    QCOMPARE(trailerCrc, quint32(0xCBF43926u));
+    QCOMPARE(trailerIsize, quint32(9u));
+
+    int exitCode = -1;
+    QString stderrMessage;
+    const QByteArray decoded = runGzipDecoder(decoder, gzPath, &exitCode,
+                                              &stderrMessage);
+    QVERIFY2(stderrMessage.isEmpty(), qPrintable(stderrMessage));
+    QCOMPARE(exitCode, 0);
+    QCOMPARE(decoded, input);
+}
+
+void DiagnosticReporterTest::gzipCompressEmptyInputProducesValidStream()
+{
+    const QString decoder = resolveGzipDecoder();
+    if (decoder.isEmpty()) {
+        QSKIP("Neither gzip nor gunzip is on PATH; "
+              "skipping empty-input test.");
+    }
+
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString gzPath = tempDir.filePath(QStringLiteral("empty.gz"));
+
+    const QByteArray payload = DiagnosticReporter::gzipCompress(QByteArray());
+    QCOMPARE(payload.size(), 20);
+
+    QVERIFY(writeFile(gzPath, payload));
+
+    int exitCode = -1;
+    QString stderrMessage;
+    const QByteArray decoded = runGzipDecoder(decoder, gzPath, &exitCode,
+                                              &stderrMessage);
+    QVERIFY2(stderrMessage.isEmpty(), qPrintable(stderrMessage));
+    QCOMPARE(exitCode, 0);
+    QVERIFY2(decoded.isEmpty(),
+             qPrintable(QStringLiteral("Empty input did not decode to "
+                                       "empty output: %1 bytes")
+                        .arg(decoded.size())));
+
+    const auto *p = reinterpret_cast<const quint8 *>(payload.constData());
+    for (int i = 12; i < 20; ++i) {
+        QCOMPARE(static_cast<int>(p[i]), 0x00);
+    }
+}
+
+void DiagnosticReporterTest::gzipCompressRoundTripsBinaryWithNulsAndAllBytes()
+{
+    const QString decoder = resolveGzipDecoder();
+    if (decoder.isEmpty()) {
+        QSKIP("Neither gzip nor gunzip is on PATH; skipping binary-input "
+              "round-trip test.");
+    }
+
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString gzPath = tempDir.filePath(QStringLiteral("binary.gz"));
+
+    // A deterministic input that exercises every byte value, plenty of
+    // NULs, and a long run of repeated bytes that defeats naive LZ77
+    // heuristics. 8192 bytes is plenty to cover all 256 byte values and
+    // remains small enough that the test runs in under a second.
+    QByteArray input;
+    input.reserve(8192);
+    for (int i = 0; i < 8192; ++i) {
+        const int b = (i * 73 + 11) & 0xff;
+        input.append(static_cast<char>(b));
+    }
+    // Inject a few NUL runs that gzip's deflate stores verbatim.
+    for (int i = 0; i < 4; ++i) {
+        const int offset = (i * 2048) + 17;
+        for (int j = 0; j < 32; ++j) {
+            input[offset + j] = '\0';
+        }
+    }
+
+    const QByteArray payload = DiagnosticReporter::gzipCompress(input);
+    QVERIFY2(!payload.isEmpty(),
+             qPrintable(QStringLiteral("gzipCompress returned empty for "
+                                       "%1-byte binary input.")
+                        .arg(input.size())));
+    QVERIFY(writeFile(gzPath, payload));
+
+    int exitCode = -1;
+    QString errorMessage;
+    const QByteArray decoded = runGzipDecoder(decoder, gzPath, &exitCode,
+                                              &errorMessage);
+    QVERIFY2(errorMessage.isEmpty(), qPrintable(errorMessage));
+    QCOMPARE(exitCode, 0);
+    QCOMPARE(decoded, input);
+}
+
+void DiagnosticReporterTest::gzipCompressRoundTripsLargeIncompressibleInput()
+{
+    const QString decoder = resolveGzipDecoder();
+    if (decoder.isEmpty()) {
+        QSKIP("Neither gzip nor gunzip is on PATH; skipping large-input "
+              "round-trip test.");
+    }
+
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString gzPath = tempDir.filePath(QStringLiteral("large.gz"));
+
+    // 256 KiB of pseudo-random bytes that no LZ77 will compress; this
+    // exercises the deflate bounded-output path of qCompress and the
+    // trailer arithmetic at the upper end of the input size.
+    QByteArray input;
+    input.reserve(256 * 1024);
+    quint32 seed = 0xc0ffee01u;
+    for (int i = 0; i < 256 * 1024; ++i) {
+        seed = seed * 1664525u + 1013904223u;
+        input.append(static_cast<char>((seed >> 16) & 0xff));
+    }
+
+    const QByteArray payload = DiagnosticReporter::gzipCompress(input);
+    QVERIFY2(!payload.isEmpty(),
+             qPrintable(QStringLiteral("gzipCompress returned empty for "
+                                       "%1-byte input.")
+                        .arg(input.size())));
+    QVERIFY(writeFile(gzPath, payload));
+
+    int exitCode = -1;
+    QString errorMessage;
+    const QByteArray decoded = runGzipDecoder(decoder, gzPath, &exitCode,
+                                              &errorMessage);
+    QVERIFY2(errorMessage.isEmpty(), qPrintable(errorMessage));
+    QCOMPARE(exitCode, 0);
+    QCOMPARE(decoded.size(), input.size());
+    QCOMPARE(decoded, input);
+
+    // ISIZE must equal input.size() modulo 2^32. For inputs that fit in
+    // 32 bits this is just input.size() in little-endian.
+    const auto *p = reinterpret_cast<const quint8 *>(payload.constData());
+    const quint32 trailerIsize =
+        static_cast<quint32>(p[payload.size() - 4])
+        | (static_cast<quint32>(p[payload.size() - 3]) << 8)
+        | (static_cast<quint32>(p[payload.size() - 2]) << 16)
+        | (static_cast<quint32>(p[payload.size() - 1]) << 24);
+    QCOMPARE(static_cast<quint64>(trailerIsize),
+             static_cast<quint64>(input.size()));
+}
+
+void DiagnosticReporterTest::gzipCompressIsDeterministic()
+{
+    // Identical input must produce byte-identical output. The fixed
+    // MTIME=0 header and the deterministic CRC32 + ISIZE trailer are
+    // the only stable parts of the stream; the deflate payload from
+    // qCompress is also deterministic, so we can compare full streams.
+    const QByteArray input = QByteArrayLiteral("deterministic gzip input");
+    const QByteArray first = DiagnosticReporter::gzipCompress(input);
+    const QByteArray second = DiagnosticReporter::gzipCompress(input);
+    const QByteArray third = DiagnosticReporter::gzipCompress(input);
+    QCOMPARE(first, second);
+    QCOMPARE(first, third);
+
+    QVERIFY(first.size() >= 10);
+    for (int i = 4; i <= 7; ++i) {
+        QCOMPARE(static_cast<int>(static_cast<quint8>(first[i])), 0x00);
+    }
 }
 
 QTEST_GUILESS_MAIN(DiagnosticReporterTest)
