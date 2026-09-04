@@ -22,7 +22,7 @@
 #include <zlib.h>
 
 #ifndef VBT_DIAG_ENDPOINT
-#define VBT_DIAG_ENDPOINT "https://crash-endpoint.workers.dev/v1/report"
+#define VBT_DIAG_ENDPOINT "https://crash-endpoint.crash-endpoint.workers.dev/v1/report"
 #endif
 
 namespace {

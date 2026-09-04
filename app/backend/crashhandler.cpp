@@ -67,6 +67,10 @@ char s_BuildIdHex[kBuildIdHexMax + 1] = {0};
 // from disk the same way readelf does.
 char s_ExeRealpath[4096] = {0};
 
+// Forward-declared so writeHex() (defined above) can call it; the full
+// definition lives below, immediately before writeString().
+static std::size_t writeAll(int fd, const char* buf, std::size_t len);
+
 // Hand-rolled signal-safe integer-to-hex formatter. sprintf/snprintf with
 // %p/%x are not guaranteed async-signal-safe; we write nibbles into a stack
 // buffer ourselves.
@@ -96,8 +100,7 @@ void writeHex(int fd, unsigned long long value)
     }
 
     buf[pos] = '\0';
-    ssize_t written = ::write(fd, buf, static_cast<std::size_t>(pos));
-    (void)written;
+    writeAll(fd, buf, static_cast<std::size_t>(pos));
 }
 
 // Async-signal-safe. Retries on EINTR and partial writes; bails out after a
@@ -152,11 +155,17 @@ void writeProcMaps(int fd)
     }
 
     char chunk[4096];
-    while (true) {
+    // Bound the iteration count so a pathological signal storm cannot
+    // spin the loop forever inside a signal handler. A multi-hundred-KB
+    // /proc/self/maps in 4096-byte chunks needs at most ~200 iterations
+    // in the worst realistic case; 100000 is comfortably above that.
+    constexpr int kMaxIterations = 100000;
+    for (int iterations = 0; iterations < kMaxIterations; ++iterations) {
         const ssize_t n = ::read(mapsFd, chunk, sizeof(chunk));
         if (n > 0) {
-            ssize_t written = ::write(fd, chunk, static_cast<std::size_t>(n));
-            if (written < 0) {
+            const std::size_t written = writeAll(fd, chunk,
+                                                 static_cast<std::size_t>(n));
+            if (written != static_cast<std::size_t>(n)) {
                 break;
             }
         }
