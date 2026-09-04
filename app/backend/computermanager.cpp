@@ -933,7 +933,7 @@ qDebug() << "PendingOTPPairingTask: Generated AES key from salt+PIN";
                 qDebug() << "PendingOTPPairingTask: Full pairing handshake completed successfully";
                 return true;
             } else {
-                qDebug() << "PendingOTPPairingTask: Final pairing challenge failed:" << finalResp;
+                qDebug() << "PendingOTPPairingTask: Final pairing challenge failed";
                 return false;
             }
             

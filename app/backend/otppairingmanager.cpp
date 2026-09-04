@@ -147,8 +147,8 @@ void OTPPairingManager::performOTPPairing(NvComputer *computer, const QString &p
     // Generate the OTP hash using the same salt that will be sent in the pairing request
     QString otpHash = generateOTPHash(pin, saltStr, passphrase);
     
-    qDebug() << "OTPPairingManager: Generated OTP hash:" << otpHash;
-    qDebug() << "OTPPairingManager: Using salt:" << saltStr;
+    qDebug() << "OTPPairingManager: Generated OTP hash";
+    qDebug() << "OTPPairingManager: Using salt";
     
     emit pairingProgress("Connecting to server...");
     
@@ -165,10 +165,10 @@ void OTPPairingManager::sendOTPPairingRequest(NvComputer *computer, const QStrin
         NvHTTP http(computer);
         
         qDebug() << "OTPPairingManager: Starting Apollo OTP pairing";
-        qDebug() << "OTPPairingManager: PIN from user (server-generated):" << m_currentPin;
-        qDebug() << "OTPPairingManager: Passphrase from user:" << m_currentPassphrase;
-        qDebug() << "OTPPairingManager: Generated OTP hash:" << otpHash;
-        qDebug() << "OTPPairingManager: Using salt:" << salt;
+        qDebug() << "OTPPairingManager: PIN received from user (server-generated)";
+        qDebug() << "OTPPairingManager: Passphrase received from user";
+        qDebug() << "OTPPairingManager: Generated OTP hash";
+        qDebug() << "OTPPairingManager: Using salt";
         qDebug() << "OTPPairingManager: Server HTTP URL:" << http.m_BaseUrlHttp.toString();
         qDebug() << "OTPPairingManager: Server HTTPS URL:" << http.m_BaseUrlHttps.toString();
         
