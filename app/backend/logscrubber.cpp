@@ -34,11 +34,14 @@ const QRegularExpression& urlHostRegex()
 
 // PEM blocks: from "-----BEGIN ..." through "-----END ...". Multiline, with
 // DotMatchesEverythingOption so the body (which may contain dashes and new
-// lines) is consumed.
+// lines) is consumed. The body uses a tempered greedy token —
+// (?:(?!-----BEGIN)[\s\S])*? — so an unterminated -----BEGIN block cannot
+// swallow forward into the NEXT block's -----END marker (which would
+// destroy every useful log line that happened to sit in between).
 const QRegularExpression& pemBlockRegex()
 {
     static const QRegularExpression re(
-        QStringLiteral(R"(-----BEGIN [^-]+-----[\s\S]*?-----END [^-]+-----)"));
+        QStringLiteral(R"(-----BEGIN [^-]+-----(?:(?!-----BEGIN)[\s\S])*?-----END [^-]+-----)"));
     return re;
 }
 
@@ -165,28 +168,28 @@ const QRegularExpression& appTitleElementRegex()
 const QRegularExpression& pcFoundUnexpectedRegex()
 {
     static const QRegularExpression re(
-        QStringLiteral(R"(Found unexpected PC\s+\S+\s+looking for\s+\S+)"));
+        QStringLiteral(R"(Found unexpected PC\s+(?:"[^"]*"|\S+)\s+looking for\s+(?:"[^"]*"|\S+))"));
     return re;
 }
 
 const QRegularExpression& pcIsNowOnlineRegex()
 {
     static const QRegularExpression re(
-        QStringLiteral(R"((?:^|\s)\S+\s+is now online at)"));
+        QStringLiteral(R"((?:^|\s)(?:"[^"]*"|\S+)\s+is now online at)"));
     return re;
 }
 
 const QRegularExpression& pcIsNowOfflineRegex()
 {
     static const QRegularExpression re(
-        QStringLiteral(R"((?:^|\s)\S+\s+is now offline(?:\s|$))"));
+        QStringLiteral(R"((?:^|\s)(?:"[^"]*"|\S+)\s+is now offline(?:\s|$))"));
     return re;
 }
 
 const QRegularExpression& pcDiscoveredMdnsRegex()
 {
     static const QRegularExpression re(
-        QStringLiteral(R"(Discovered mDNS host:\s+\S+)"));
+        QStringLiteral(R"(Discovered mDNS host:\s+(?:"[^"]*"|\S+))"));
     return re;
 }
 
@@ -207,7 +210,7 @@ const QRegularExpression& pcResolvedRegex()
 const QRegularExpression& pcNowAtRegex()
 {
     static const QRegularExpression re(
-        QStringLiteral(R"((?:^|\s)\S+\s+is now at\s)"));
+        QStringLiteral(R"((?:^|\s)(?:"[^"]*"|\S+)\s+is now at\s)"));
     return re;
 }
 
@@ -216,7 +219,7 @@ const QRegularExpression& pcNowAtRegex()
 const QRegularExpression& clipboardConnectedToRegex()
 {
     static const QRegularExpression re(
-        QStringLiteral(R"(Connected to\s+\S+)"));
+        QStringLiteral(R"(Connected to\s+(?:"[^"]*"|\S+))"));
     return re;
 }
 
@@ -226,23 +229,26 @@ const QRegularExpression& clipboardConnectedToRegex()
 const QRegularExpression& pcHasNoMacAddressRegex()
 {
     static const QRegularExpression re(
-        QStringLiteral(R"((?:^|\s)\S+\s+has no MAC address stored)"));
+        QStringLiteral(R"((?:^|\s)(?:"[^"]*"|\S+)\s+has no MAC address stored)"));
     return re;
 }
 
 const QRegularExpression& pcIsAlreadyOnlineRegex()
 {
     static const QRegularExpression re(
-        QStringLiteral(R"((?:^|\s)\S+\s+is already online)"));
+        QStringLiteral(R"((?:^|\s)(?:"[^"]*"|\S+)\s+is already online)"));
     return re;
 }
 
 // NvComputer::wake(): "Sent WoL packet to <name> via ..." (qInfo().nospace()
-// .noquote(), so no surrounding quotes on the name).
+// .noquote(), so no surrounding quotes on the name). Use a lazy match
+// bounded by the literal " via " that always follows the name in this
+// exact call site; a bare-or-quoted token cannot help here because
+// Qt's default quoting has been explicitly disabled at the call site.
 const QRegularExpression& sentWolPacketRegex()
 {
     static const QRegularExpression re(
-        QStringLiteral(R"(Sent WoL packet to\s+\S+\s+via)"));
+        QStringLiteral(R"(Sent WoL packet to\s+.+?\s+via)"));
     return re;
 }
 
@@ -250,7 +256,7 @@ const QRegularExpression& sentWolPacketRegex()
 const QRegularExpression& startingOtpPairingForRegex()
 {
     static const QRegularExpression re(
-        QStringLiteral(R"(Starting OTP pairing task for\s+\S+)"));
+        QStringLiteral(R"(Starting OTP pairing task for\s+(?:"[^"]*"|\S+))"));
     return re;
 }
 
@@ -260,15 +266,18 @@ const QRegularExpression& startingOtpPairingForRegex()
 const QRegularExpression& foundMatchingInterfaceRegex()
 {
     static const QRegularExpression re(
-        QStringLiteral(R"(Found matching interface:\s+\S+)"));
+        QStringLiteral(R"(Found matching interface:\s+(?:"[^"]*"|\S+))"));
     return re;
 }
 
 // Discord username: only appears in "Discord integration ready for user: <u>".
+// Conservatively uses the quoted-or-bare token even though current
+// Discord usernames cannot contain spaces — legacy accounts exist, and
+// the username field format is not something this codebase controls.
 const QRegularExpression& discordUsernameRegex()
 {
     static const QRegularExpression re(
-        QStringLiteral(R"(Discord integration ready for user:\s+\S+)"));
+        QStringLiteral(R"(Discord integration ready for user:\s+(?:"[^"]*"|\S+))"));
     return re;
 }
 

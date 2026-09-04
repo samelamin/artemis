@@ -1,28 +1,24 @@
+import { DurableObject } from "cloudflare:workers";
+
 import {
   checkAndIncrementBudget,
   type BudgetCheckResult,
   type BudgetState,
 } from "./dailyBudget";
 
+// Cloudflare Workers RPC only exposes custom methods on a Durable Object
+// stub when the class extends the "cloudflare:workers" DurableObject base
+// (the generic parameter on DurableObjectNamespace brands the stub with
+// the class's exported RPC surface). Generic on the namespace is therefore
+// wired to DailyBudgetCounter so callers can invoke checkAndIncrement
+// without a cast. All instances of this class share one logical counter
+// per UTC day via a single, fixed DO id (see idFromName("global") in
+// handlePutReport below), so storage grows by one small BudgetState row
+// per calendar day — negligible, no expiry needed.
 export interface Env {
   REPORTS_BUCKET: R2Bucket;
-  DAILY_BUDGET_DO: DurableObjectNamespace;
+  DAILY_BUDGET_DO: DurableObjectNamespace<DailyBudgetCounter>;
   REPORT_RATE_LIMITER: RateLimit;
-}
-
-// DurableObjectNamespace is used untyped above (no generic) because the
-// generic form requires the DO class to be RPC-branded, which only happens
-// by extending the cloudflare:workers DurableObject base class — and we
-// deliberately do not extend that (see DailyBudgetCounter below). This
-// interface describes the one custom RPC method callers actually invoke on
-// the stub; the DurableObjectStub returned by .get() is cast to it below.
-interface DailyBudgetStub {
-  checkAndIncrement(
-    day: string,
-    incomingBytes: number,
-    capBytes: number,
-    capRequests: number,
-  ): Promise<BudgetCheckResult>;
 }
 
 const CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -35,18 +31,14 @@ const MAX_DAILY_REQUESTS = 4000;
 
 const REPORT_PATH = "/v1/report";
 
-// Durable Object that owns the daily budget counter. A plain class (does
-// NOT extend the cloudflare:workers DurableObject base) — see the note at
-// the top of this prompt / Wave 7 notes for why. All instances of this
-// class share one logical counter per UTC day via a single, fixed DO id
-// (see idFromName("global") in handlePutReport below), so storage grows by
-// one small BudgetState row per calendar day — negligible, no expiry
-// needed.
-export class DailyBudgetCounter {
-  private readonly state: DurableObjectState;
-
-  constructor(state: DurableObjectState, _env: Env) {
-    this.state = state;
+// Durable Object that owns the daily budget counter. Extends the
+// "cloudflare:workers" DurableObject base so its custom methods are
+// exposed over RPC on the stub returned by env.DAILY_BUDGET_DO.get(...).
+// The base class stores the constructor args as this.ctx (the
+// DurableObjectState) and this.env (the worker Env).
+export class DailyBudgetCounter extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
   }
 
   async checkAndIncrement(
@@ -57,8 +49,8 @@ export class DailyBudgetCounter {
   ): Promise<BudgetCheckResult> {
     return checkAndIncrementBudget(
       {
-        get: (key) => this.state.storage.get<BudgetState>(key),
-        put: (key, value) => this.state.storage.put<BudgetState>(key, value),
+        get: (key) => this.ctx.storage.get<BudgetState>(key),
+        put: (key, value) => this.ctx.storage.put<BudgetState>(key, value),
       },
       day,
       incomingBytes,
@@ -147,7 +139,7 @@ export async function handlePutReport(
   }
 
   const doId = env.DAILY_BUDGET_DO.idFromName("global");
-  const budgetStub = env.DAILY_BUDGET_DO.get(doId) as unknown as DailyBudgetStub;
+  const budgetStub = env.DAILY_BUDGET_DO.get(doId);
   const budget = await budgetStub.checkAndIncrement(
     dayKeyFor(now),
     buf.byteLength,

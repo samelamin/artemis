@@ -4,6 +4,7 @@ import {
   generateReportId,
   objectKeyFor,
   dayKeyFor,
+  type DailyBudgetCounter,
   type Env,
 } from "../src/index";
 import worker from "../src/index";
@@ -140,7 +141,7 @@ function makeEnv(): TestEnv {
   const r2 = new FakeR2Bucket();
   const env: Env = {
     REPORTS_BUCKET: r2 as unknown as R2Bucket,
-    DAILY_BUDGET_DO: budgetDO as unknown as DurableObjectNamespace,
+    DAILY_BUDGET_DO: budgetDO as unknown as DurableObjectNamespace<DailyBudgetCounter>,
     REPORT_RATE_LIMITER: limiter as unknown as RateLimit,
   };
   return { env, budgetDO, limiter, r2 };

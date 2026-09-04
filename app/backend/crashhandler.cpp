@@ -100,6 +100,28 @@ void writeHex(int fd, unsigned long long value)
     (void)written;
 }
 
+// Async-signal-safe. Retries on EINTR and partial writes; bails out after a
+// bounded number of attempts so a persistently failing fd cannot spin
+// forever inside a signal handler. Returns the number of bytes actually
+// written.
+static std::size_t writeAll(int fd, const char* buf, std::size_t len)
+{
+    constexpr int kMaxAttempts = 1024;
+    std::size_t written = 0;
+    int attempts = 0;
+    while (written < len && attempts < kMaxAttempts) {
+        ssize_t n = ::write(fd, buf + written, len - written);
+        if (n > 0) {
+            written += static_cast<std::size_t>(n);
+        }
+        else if (n < 0 && errno != EINTR) {
+            break;
+        }
+        ++attempts;
+    }
+    return written;
+}
+
 void writeString(int fd, const char* s)
 {
     if (s == nullptr) {
@@ -115,8 +137,7 @@ void writeString(int fd, const char* s)
     while (len < kMaxLen && s[len] != '\0') {
         len++;
     }
-    ssize_t written = ::write(fd, s, len);
-    (void)written;
+    writeAll(fd, s, len);
 }
 
 void writeProcMaps(int fd)
@@ -351,14 +372,23 @@ void handleSignal(int sig, siginfo_t* info, void* /*ucontext*/)
     // backtrace() was pre-warmed at install time, so this call does not
     // allocate. It is still not strictly async-signal-safe on glibc (it can
     // take the dynamic loader lock), which could deadlock the handler if
-    // the crashing thread already held that lock. alarm() is itself
-    // async-signal-safe; arm a 5-second watchdog immediately before the
-    // call and disarm it immediately after, so a deadlocked backtrace()
-    // is killed by SIGALRM's default action (process termination) instead
-    // of hanging the process with a half-written crash file forever.
+    // the crashing thread already held that lock. arm a 5-second watchdog
+    // immediately before the call and disarm it immediately after — but
+    // with a SIGALRM handler installed (not the default disposition) so a
+    // deadlocked backtrace() that *does* survive the 5s timeout still
+    // ends in a controlled process exit rather than the wrong exit signal
+    // (SIGALRM's default is "terminate without core dump"), which would
+    // defeat the system crash reporter.
+    struct sigaction alarmPrev {};
+    struct sigaction alarmSa {};
+    alarmSa.sa_handler = [](int) { ::_exit(128 + SIGALRM); };
+    sigemptyset(&alarmSa.sa_mask);
+    alarmSa.sa_flags = 0;
+    ::sigaction(SIGALRM, &alarmSa, &alarmPrev);
     ::alarm(5);
     const int nFrames = ::backtrace(frameBuffer, kMaxFrames);
     ::alarm(0);
+    ::sigaction(SIGALRM, &alarmPrev, nullptr);
     for (int i = 0; i < nFrames; i++) {
         writeHex(s_CrashFd,
                  reinterpret_cast<unsigned long long>(frameBuffer[i]));

@@ -36,6 +36,7 @@ private slots:
     void redactsMacUserPath();
     void redactsConfigPath();
     void redactsPemBlock();
+    void redactsPemBlockUnterminated();
     void redactsBearerToken();
     void redactsUrlHostDotLocal();
     void redactsUrlHostBareHostname();
@@ -48,6 +49,24 @@ private slots:
     void preservesGeneralErrorText();
     void preservesStreamingResolutionWarning();
     void preservesQuittingAppFailureReason();
+
+    // Per-class coverage of the multiword redaction fix (Wave 9 item 5):
+    // each test feeds a multiword name into a different scrubber rule and
+    // asserts that EVERY word of the name is absent from the scrubbed
+    // output, not just the whole phrase. Locks in the (?:\"[^\"]*\"|\S+)
+    // token shape and the lazy ".+?\\s+via" form for the WoL exception.
+    void redactsMultiwordQuotedPcName();
+    void redactsMultiwordQuotedOfflineName();
+    void redactsMultiwordQuotedMdnsName();
+    void redactsMultiwordQuotedNowAtName();
+    void redactsMultiwordQuotedClipboardName();
+    void redactsMultiwordQuotedNoMacName();
+    void redactsMultiwordQuotedAlreadyOnlineName();
+    void redactsMultiwordQuotedOtpPairingName();
+    void redactsMultiwordQuotedInterfaceName();
+    void redactsMultiwordQuotedDiscordUsername();
+    void redactsMultiwordQuotedFoundUnexpectedName();
+    void redactsMultiwordBareWolName();
 
     void syntheticFixtureStripsAllPii();
 };
@@ -432,6 +451,47 @@ void LogScrubberTest::redactsPemBlock()
              qPrintable(QStringLiteral("Expected [REDACTED] placeholder. Got: ") + out));
 }
 
+// Locks in the Wave 9 item-4 fix: a -----BEGIN block whose body never
+// includes the matching -----END must NOT swallow forward into the NEXT
+// block's footer (which is what the old "[\\s\\S]*?" body did). The
+// surviving lines before and after the truncated block must come through
+// scrubbing untouched — those are the diagnostic lines this code path is
+// most likely to destroy by accident.
+//
+// Note: the truncated BEGIN header itself remains in the output (no regex
+// match is produced because the tempered greedy body can't reach a
+// -----END without crossing another -----BEGIN first, so the overall
+// pattern fails to match). That is the correct, intended behavior of
+// the fix — the spec requires that the diagnostic lines around the
+// truncated block survive, NOT that the truncated BEGIN line itself be
+// scrubbed. (A real -----BEGIN with no matching -----END is malformed
+// PEM and would not be loadable as a cert anyway.)
+void LogScrubberTest::redactsPemBlockUnterminated()
+{
+    const QString input = QStringLiteral(
+        "00:00:01.000 - Info - Server certificate (truncated upload):\n"
+        "-----BEGIN CERTIFICATE-----\n"
+        "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAdeadbeefcafef00dba11\n"
+        "00:00:02.000 - Info - Starting Apollo OTP pairing for Living Room PC\n"
+        "00:00:03.000 - Info - Resolving steamdeck.local timed out\n");
+    const QString out = scrubOne(input);
+
+    // The whole point of the fix: surrounding diagnostic lines must NOT
+    // have been swallowed by a regex that was looking for a -----END
+    // footer that doesn't exist. They can still be scrubbed by the
+    // other rules (the hostname on the "Resolving ... timed out" line
+    // becomes <HOST>), but the surrounding context must survive.
+    QVERIFY2(out.contains(QStringLiteral("Starting Apollo OTP pairing for Living Room PC")),
+             qPrintable(QStringLiteral("Diagnostic line between blocks was swallowed: ") + out));
+    QVERIFY2(out.contains(QStringLiteral("Resolving <HOST> timed out")),
+             qPrintable(QStringLiteral("Diagnostic line after the truncated block was swallowed: ") + out));
+    // The introductory line that flagged the truncated upload also
+    // survives — proving the unterminated BEGIN line did not get pulled
+    // forward into any later redaction pass.
+    QVERIFY2(out.contains(QStringLiteral("Server certificate (truncated upload):")),
+             qPrintable(QStringLiteral("Introductory diagnostic line was swallowed: ") + out));
+}
+
 void LogScrubberTest::redactsBearerToken()
 {
     const QString input = QStringLiteral(
@@ -557,6 +617,207 @@ void LogScrubberTest::preservesQuittingAppFailureReason()
         "Quitting app failed, reason: Connection timed out");
     const QString out = scrubOne(input);
     QCOMPARE(out, input);
+}
+
+// Per-class coverage of the Wave 9 item-5 multiword redaction fix. Every
+// test feeds a multiword value (QDebug default quoting around it, like Qt
+// emits at the real call sites) into one specific scrubber rule and asserts
+// that EACH word of the value is absent from the scrubbed output — not
+// merely that the whole phrase disappeared (which the old \\S+ rule also
+// would have done once it matched the first word and missed the rest).
+
+void LogScrubberTest::redactsMultiwordQuotedPcName()
+{
+    const QString input = QStringLiteral(
+        "\"Living Room PC\" is now online at 192.168.1.5:47984");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("Living")),
+             qPrintable(QStringLiteral("First word of multiword PC name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("Room")),
+             qPrintable(QStringLiteral("Middle word of multiword PC name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("PC")),
+             qPrintable(QStringLiteral("Last word of multiword PC name survived: ") + out));
+    QVERIFY2(out.contains(QStringLiteral("<HOST> is now online at")),
+             qPrintable(QStringLiteral("Expected '<HOST> is now online at' placeholder. Got: ") + out));
+}
+
+void LogScrubberTest::redactsMultiwordQuotedOfflineName()
+{
+    const QString input = QStringLiteral(
+        "\"Living Room PC\" is now offline");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("Living")),
+             qPrintable(QStringLiteral("First word of multiword offline name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("Room")),
+             qPrintable(QStringLiteral("Middle word of multiword offline name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("PC")),
+             qPrintable(QStringLiteral("Last word of multiword offline name survived: ") + out));
+    QVERIFY2(out.contains(QStringLiteral("<HOST> is now offline")),
+             qPrintable(QStringLiteral("Expected '<HOST> is now offline' placeholder. Got: ") + out));
+}
+
+void LogScrubberTest::redactsMultiwordQuotedMdnsName()
+{
+    const QString input = QStringLiteral(
+        "Discovered mDNS host: \"Living Room PC\"");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("Living")),
+             qPrintable(QStringLiteral("First word of multiword mDNS name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("Room")),
+             qPrintable(QStringLiteral("Middle word of multiword mDNS name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("PC")),
+             qPrintable(QStringLiteral("Last word of multiword mDNS name survived: ") + out));
+    QVERIFY2(out.contains(QStringLiteral("Discovered mDNS host: <HOST>")),
+             qPrintable(QStringLiteral("Expected 'Discovered mDNS host: <HOST>' placeholder. Got: ") + out));
+}
+
+void LogScrubberTest::redactsMultiwordQuotedNowAtName()
+{
+    const QString input = QStringLiteral(
+        "\"Living Room PC\" is now at 192.168.1.5:47984");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("Living")),
+             qPrintable(QStringLiteral("First word of multiword now-at name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("Room")),
+             qPrintable(QStringLiteral("Middle word of multiword now-at name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("PC")),
+             qPrintable(QStringLiteral("Last word of multiword now-at name survived: ") + out));
+    QVERIFY2(out.contains(QStringLiteral("<HOST> is now at")),
+             qPrintable(QStringLiteral("Expected '<HOST> is now at' placeholder. Got: ") + out));
+}
+
+void LogScrubberTest::redactsMultiwordQuotedClipboardName()
+{
+    const QString input = QStringLiteral(
+        "ClipboardManager: Connected to \"Living Room PC\"");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("Living")),
+             qPrintable(QStringLiteral("First word of multiword clipboard name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("Room")),
+             qPrintable(QStringLiteral("Middle word of multiword clipboard name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("PC")),
+             qPrintable(QStringLiteral("Last word of multiword clipboard name survived: ") + out));
+    QVERIFY2(out.contains(QStringLiteral("Connected to <HOST>")),
+             qPrintable(QStringLiteral("Expected 'Connected to <HOST>' placeholder. Got: ") + out));
+}
+
+void LogScrubberTest::redactsMultiwordQuotedNoMacName()
+{
+    const QString input = QStringLiteral(
+        "\"Living Room PC\" has no MAC address stored");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("Living")),
+             qPrintable(QStringLiteral("First word of multiword no-MAC name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("Room")),
+             qPrintable(QStringLiteral("Middle word of multiword no-MAC name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("PC")),
+             qPrintable(QStringLiteral("Last word of multiword no-MAC name survived: ") + out));
+    QVERIFY2(out.contains(QStringLiteral("<HOST> has no MAC address stored")),
+             qPrintable(QStringLiteral("Expected '<HOST> has no MAC address stored' placeholder. Got: ") + out));
+}
+
+void LogScrubberTest::redactsMultiwordQuotedAlreadyOnlineName()
+{
+    const QString input = QStringLiteral(
+        "\"Living Room PC\" is already online");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("Living")),
+             qPrintable(QStringLiteral("First word of multiword already-online name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("Room")),
+             qPrintable(QStringLiteral("Middle word of multiword already-online name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("PC")),
+             qPrintable(QStringLiteral("Last word of multiword already-online name survived: ") + out));
+    QVERIFY2(out.contains(QStringLiteral("<HOST> is already online")),
+             qPrintable(QStringLiteral("Expected '<HOST> is already online' placeholder. Got: ") + out));
+}
+
+void LogScrubberTest::redactsMultiwordQuotedOtpPairingName()
+{
+    const QString input = QStringLiteral(
+        "Starting OTP pairing task for \"Living Room PC\"");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("Living")),
+             qPrintable(QStringLiteral("First word of multiword OTP name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("Room")),
+             qPrintable(QStringLiteral("Middle word of multiword OTP name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("PC")),
+             qPrintable(QStringLiteral("Last word of multiword OTP name survived: ") + out));
+    QVERIFY2(out.contains(QStringLiteral("Starting OTP pairing task for <HOST>")),
+             qPrintable(QStringLiteral("Expected 'Starting OTP pairing task for <HOST>' placeholder. Got: ") + out));
+}
+
+void LogScrubberTest::redactsMultiwordQuotedInterfaceName()
+{
+    const QString input = QStringLiteral(
+        "Found matching interface: \"Living Room PC\" aa:bb:cc:dd:ee:ff QFlags(...)");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("Living")),
+             qPrintable(QStringLiteral("First word of multiword interface name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("Room")),
+             qPrintable(QStringLiteral("Middle word of multiword interface name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("PC")),
+             qPrintable(QStringLiteral("Last word of multiword interface name survived: ") + out));
+    QVERIFY2(out.contains(QStringLiteral("Found matching interface: <HOST>")),
+             qPrintable(QStringLiteral("Expected 'Found matching interface: <HOST>' placeholder. Got: ") + out));
+}
+
+void LogScrubberTest::redactsMultiwordQuotedDiscordUsername()
+{
+    // Legacy Discord accounts with display-name spaces — current-generation
+    // usernames cannot contain spaces, but the spec requires the scrubber
+    // to handle the legacy shape defensively.
+    const QString input = QStringLiteral(
+        "Discord integration ready for user: \"Living Room PC\"");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("Living")),
+             qPrintable(QStringLiteral("First word of multiword Discord username survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("Room")),
+             qPrintable(QStringLiteral("Middle word of multiword Discord username survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("PC")),
+             qPrintable(QStringLiteral("Last word of multiword Discord username survived: ") + out));
+    QVERIFY2(out.contains(QStringLiteral("Discord integration ready for user: <USER>")),
+             qPrintable(QStringLiteral("Expected 'Discord integration ready for user: <USER>' placeholder. Got: ") + out));
+}
+
+void LogScrubberTest::redactsMultiwordQuotedFoundUnexpectedName()
+{
+    const QString input = QStringLiteral(
+        "Found unexpected PC \"Living Room PC\" looking for \"Office Desktop\"");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("Living")),
+             qPrintable(QStringLiteral("First word of first multiword unexpected-PC name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("Room")),
+             qPrintable(QStringLiteral("Middle word of first multiword unexpected-PC name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("Living Room PC")),
+             qPrintable(QStringLiteral("First multiword unexpected-PC name (whole) survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("Office")),
+             qPrintable(QStringLiteral("First word of second multiword unexpected-PC name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("Desktop")),
+             qPrintable(QStringLiteral("Second word of second multiword unexpected-PC name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("Office Desktop")),
+             qPrintable(QStringLiteral("Second multiword unexpected-PC name (whole) survived: ") + out));
+    QVERIFY2(out.contains(QStringLiteral("Found unexpected PC <HOST> looking for <HOST>")),
+             qPrintable(QStringLiteral("Expected 'Found unexpected PC <HOST> looking for <HOST>' placeholder. Got: ") + out));
+}
+
+// WoL is the one exception: the call site uses nospace().noquote(), so
+// the multiword name has no surrounding quotes at all. Locks in the
+// lazy ".+?\\s+via" fix that matches up to the literal " via " delimiter.
+void LogScrubberTest::redactsMultiwordBareWolName()
+{
+    const QString input = QStringLiteral(
+        "Sent WoL packet to Living Room PC via 192.168.1.5:9");
+    const QString out = scrubOne(input);
+    QVERIFY2(!out.contains(QStringLiteral("Living")),
+             qPrintable(QStringLiteral("First word of bare multiword WoL name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("Room")),
+             qPrintable(QStringLiteral("Middle word of bare multiword WoL name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("PC")),
+             qPrintable(QStringLiteral("Last word of bare multiword WoL name survived: ") + out));
+    QVERIFY2(!out.contains(QStringLiteral("Living Room PC")),
+             qPrintable(QStringLiteral("Whole bare multiword WoL name survived: ") + out));
+    QVERIFY2(out.contains(QStringLiteral("Sent WoL packet to <HOST> via")),
+             qPrintable(QStringLiteral("Expected 'Sent WoL packet to <HOST> via' placeholder. Got: ") + out));
 }
 
 void LogScrubberTest::syntheticFixtureStripsAllPii()

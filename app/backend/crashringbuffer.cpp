@@ -3,12 +3,35 @@
 #include <QByteArray>
 
 #include <atomic>
+#include <cerrno>
 #include <cstring>
 #include <unistd.h>
 
 namespace CrashRingBuffer {
 
 namespace {
+
+// Async-signal-safe. Retries on EINTR and partial writes; bails out after a
+// bounded number of attempts so a persistently failing fd cannot spin
+// forever inside a signal handler. Returns the number of bytes actually
+// written.
+static std::size_t writeAll(int fd, const char* buf, std::size_t len)
+{
+    constexpr int kMaxAttempts = 1024;
+    std::size_t written = 0;
+    int attempts = 0;
+    while (written < len && attempts < kMaxAttempts) {
+        ssize_t n = ::write(fd, buf + written, len - written);
+        if (n > 0) {
+            written += static_cast<std::size_t>(n);
+        }
+        else if (n < 0 && errno != EINTR) {
+            break;
+        }
+        ++attempts;
+    }
+    return written;
+}
 
 // Total ring buffer size is 64 KB. A single contiguous copy is bounded to a
 // few hundred bytes (a typical log line is well under that), so even though
@@ -54,6 +77,19 @@ void append(const QString& message)
         // bytes; contention is essentially impossible in practice.
     }
 
+    // Re-check s_Crashing once the spinlock is held. The earlier
+    // s_Crashing.load() above is a fast-path bailout, but it tests
+    // s_Crashing BEFORE we acquire the spinlock — a writer that is
+    // already blocked here will pass the fast-path test, then sit on the
+    // spinlock while the crash handler sets s_Crashing = true and starts
+    // reading. Without this second check, we would then proceed to write
+    // into the buffer concurrently with the handler's snapshot, corrupting
+    // whatever it was about to capture.
+    if (s_Crashing.load(std::memory_order_acquire)) {
+        s_Spinlock.clear(std::memory_order_release);
+        return;
+    }
+
     const std::size_t head = s_WriteIndex.load(std::memory_order_relaxed);
 
     // Mirror snapshot()'s span-split read pattern. Without this split, a
@@ -91,8 +127,13 @@ std::size_t snapshot(char* outBuffer, std::size_t outBufferSize)
 
     // The crash handler must never take the spinlock or call anything that
     // can block. A best-effort, possibly-torn snapshot is fine and expected.
-    const std::size_t head = s_WriteIndex.load(std::memory_order_acquire);
+    //
+    // Load s_Wrapped BEFORE s_WriteIndex: a writer that wraps the buffer
+    // between these two loads would otherwise pair a stale pre-wrap head
+    // with wrapped=true, and we'd treat the zero-padding region as
+    // log content.
     const bool wrapped = s_Wrapped.load(std::memory_order_acquire);
+    const std::size_t head = s_WriteIndex.load(std::memory_order_acquire);
 
     if (!wrapped) {
         // The buffer has never been written past its own length. Only
@@ -132,25 +173,25 @@ std::size_t snapshotToFd(int fd)
     // buffer that would otherwise exhaust the entire alternate signal stack
     // (kAltStackSize is also 64 KB), which is the exact case sigaltstack
     // exists to survive.
-    const std::size_t head = s_WriteIndex.load(std::memory_order_acquire);
+    //
+    // Load s_Wrapped BEFORE s_WriteIndex: see snapshot() above for why.
+    // Route each span through writeAll() so a short write or EINTR cannot
+    // silently truncate the captured tail.
     const bool wrapped = s_Wrapped.load(std::memory_order_acquire);
+    const std::size_t head = s_WriteIndex.load(std::memory_order_acquire);
 
     if (!wrapped) {
         // Only [0, head) holds real data — see snapshot() above for why.
-        ssize_t w = ::write(fd, s_Buffer, head);
-        (void)w;
-        return head;
+        return writeAll(fd, s_Buffer, head);
     }
 
     const std::size_t firstSpan = kSlotCapacity - head;
-    ssize_t w1 = ::write(fd, s_Buffer + head, firstSpan);
-    (void)w1;
-    std::size_t written = firstSpan;
+    const std::size_t w1 = writeAll(fd, s_Buffer + head, firstSpan);
+    std::size_t written = w1;
 
     if (head > 0) {
-        ssize_t w2 = ::write(fd, s_Buffer, head);
-        (void)w2;
-        written += head;
+        const std::size_t w2 = writeAll(fd, s_Buffer, head);
+        written += w2;
     }
 
     return written;
