@@ -6,6 +6,18 @@ unix:!macx {
     DEFINES += VIBERTEMIS_HAS_DESKTOP_PORTAL
 }
 
+linux-g++* {
+    message(Crash diagnostics enabled)
+
+    SOURCES += \
+        backend/crashringbuffer.cpp \
+        backend/crashhandler.cpp
+
+    HEADERS += \
+        backend/crashringbuffer.h \
+        backend/crashhandler.h
+}
+
 unix:!macx {
     TARGET = artemis
 } else {

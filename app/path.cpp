@@ -115,6 +115,15 @@ void Path::initialize(bool portable)
         // On macOS, $TMPDIR is some random folder under /var/folders/ that nobody can
         // easily find, so use the system's global tmp directory instead.
         s_LogDir = "/tmp";
+#elif defined(Q_OS_LINUX)
+        // Inside a Flatpak, QDir::tempPath() is a sandbox-private /tmp that is
+        // destroyed when the last app instance exits, so nothing survives a
+        // crash. StateLocation is persisted by Flatpak at
+        // ~/.var/app/<id>/.local/state.
+        // QStandardPaths::writableLocation() only computes a path string; it
+        // does not create the directory. The caller is responsible for
+        // mkpath(".") before opening any file inside s_LogDir.
+        s_LogDir = QStandardPaths::writableLocation(QStandardPaths::StateLocation);
 #else
         s_LogDir = QDir::tempPath();
 #endif

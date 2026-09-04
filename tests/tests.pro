@@ -1,3 +1,3 @@
 TEMPLATE = subdirs
 
-SUBDIRS += refreshrate autoupdate virtualdisplay
+SUBDIRS += refreshrate autoupdate virtualdisplay crashhandler

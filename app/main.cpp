@@ -57,6 +57,10 @@
 #include "backend/servercommandmanager.h"
 #include "backend/quickmenumanager.h"
 #include "backend/steamdecksession.h"
+#ifdef Q_OS_LINUX
+#include "backend/crashhandler.h"
+#include "backend/crashringbuffer.h"
+#endif
 
 #if defined(Q_OS_WIN32)
 #define IS_UNSPECIFIED_HANDLE(x) ((x) == INVALID_HANDLE_VALUE || (x) == NULL)
@@ -97,6 +101,11 @@ static ConsoleHandles attachParentConsole()
 #elif !defined(QT_DEBUG) && defined(Q_OS_DARWIN)
 // Log to file for release Mac builds
 #define LOG_TO_FILE
+#elif defined(Q_OS_LINUX)
+// Log to file on Linux for every build (debug and release). Stderr is also
+// kept as an output sink via LoggerTask so user redirections like
+// `artemis 2>my.log` continue to receive log output.
+#define LOG_TO_FILE
 #else
 // Log to console for debug Mac builds
 #endif
@@ -124,6 +133,15 @@ public:
 
     void run() override
     {
+#ifdef Q_OS_LINUX
+        // On Linux, s_LoggerStream was redirected to the log file, but the
+        // user may have explicitly redirected stderr (e.g. `artemis 2>my.log`
+        // or running under systemd). Keep stderr as a second sink so those
+        // redirections still receive log output. Windows and Mac keep the
+        // pre-existing behavior where the file stream replaces stderr.
+        std::fwrite(m_Msg.constData(), 1, static_cast<std::size_t>(m_Msg.size()), stderr);
+        std::fflush(stderr);
+#endif
         s_LoggerStream << m_Msg;
         s_LoggerStream.flush();
     }
@@ -149,6 +167,12 @@ void logToLoggerStream(QString& message)
     // Strip session encryption keys and IVs from the logs
     message.replace(k_RikeyRegex, "&rikey=REDACTED");
     message.replace(k_RikeyIdRegex, "&rikeyid=REDACTED");
+
+    // Copy the scrubbed message into the 64 KB ring buffer so the crash
+    // handler can dump the last log lines even when the async logger thread
+    // is still draining. CrashRingBuffer::append is a no-op once the crash
+    // handler has set its crashing flag.
+    CrashRingBuffer::append(message);
 
 #ifdef LOG_TO_FILE
     auto oldLogSize = s_LogBytesWritten.fetchAndAddRelaxed(message.size());
@@ -402,6 +426,11 @@ int main(int argc, char *argv[])
 #endif
     {
         s_LoggerFile = new QFile(tempDir.filePath(QString("Artemis-%1.log").arg(QDateTime::currentSecsSinceEpoch())));
+        // QFile::open() fails silently if the parent directory does not
+        // exist. On a fresh Flatpak install the StateLocation directory does
+        // not exist until something creates it, so mkpath(".") is mandatory
+        // (mkpath on an existing directory is a harmless no-op).
+        tempDir.mkpath(".");
         if (s_LoggerFile->open(QIODevice::WriteOnly | QIODevice::Text)) {
             QTextStream(stderr) << "Redirecting log output to " << s_LoggerFile->fileName() << Qt::endl;
             s_LoggerStream.setDevice(s_LoggerFile);
@@ -430,6 +459,13 @@ int main(int argc, char *argv[])
 #ifdef Q_OS_WIN32
     // Create a crash dump when we crash on Windows
     SetUnhandledExceptionFilter(UnhandledExceptionHandler);
+#endif
+
+#ifdef Q_OS_LINUX
+    // Install the async-signal-safe crash handler. This opens the crash file
+    // and pre-warms the libgcc unwinder, so the in-handler path does not
+    // allocate or take the dynamic loader lock.
+    CrashHandler::install();
 #endif
 
 #ifdef LOG_TO_FILE
