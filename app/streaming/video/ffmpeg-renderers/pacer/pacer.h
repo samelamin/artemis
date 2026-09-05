@@ -7,6 +7,8 @@
 #include <QMutex>
 #include <QWaitCondition>
 
+#include <atomic>
+
 class IVsyncSource {
 public:
     virtual ~IVsyncSource() {}
@@ -50,6 +52,8 @@ private:
 
     void dropFrameForEnqueue(QQueue<AVFrame*>& queue);
 
+    bool waitForAsyncVsync(int timeoutMs);
+
     QQueue<AVFrame*> m_RenderQueue;
     QQueue<AVFrame*> m_PacingQueue;
     QQueue<int> m_PacingQueueHistory;
@@ -60,7 +64,8 @@ private:
     QWaitCondition m_VsyncSignalled;
     SDL_Thread* m_RenderThread;
     SDL_Thread* m_VsyncThread;
-    bool m_Stopping;
+    std::atomic<bool> m_Stopping;
+    bool m_VsyncPending;
 
     IVsyncSource* m_VsyncSource;
     IFFmpegRenderer* m_VsyncRenderer;
@@ -68,4 +73,6 @@ private:
     int m_DisplayFps;
     PVIDEO_STATS m_VideoStats;
     int m_RendererAttributes;
+
+    friend class PacerTest;
 };

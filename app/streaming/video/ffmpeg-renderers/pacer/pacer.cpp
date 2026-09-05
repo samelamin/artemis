@@ -14,6 +14,8 @@
 
 #include <SDL_syswm.h>
 
+#include <QDeadlineTimer>
+
 // Limit the number of queued frames to prevent excessive memory consumption
 // if the V-Sync source or renderer is blocked for a while. It's important
 // that the sum of all queued frames between both pacing and rendering queues
@@ -32,6 +34,7 @@ Pacer::Pacer(IFFmpegRenderer* renderer, PVIDEO_STATS videoStats) :
     m_RenderThread(nullptr),
     m_VsyncThread(nullptr),
     m_Stopping(false),
+    m_VsyncPending(false),
     m_VsyncSource(nullptr),
     m_VsyncRenderer(renderer),
     m_MaxVideoFps(0),
@@ -43,13 +46,20 @@ Pacer::Pacer(IFFmpegRenderer* renderer, PVIDEO_STATS videoStats) :
 
 Pacer::~Pacer()
 {
+    // Hold the queue lock so the stopping flag and all three wakeAll()s are
+    // observed together by the V-sync/render threads (their predicate checks
+    // and wait re-enrollments happen under the same mutex).
+    m_FrameQueueLock.lock();
     m_Stopping = true;
+    m_VsyncSignalled.wakeAll();
+    m_PacingQueueNotEmpty.wakeAll();
+    m_RenderQueueNotEmpty.wakeAll();
+    m_FrameQueueLock.unlock();
 
     // Stop the V-sync thread
     if (m_VsyncThread != nullptr) {
-        m_PacingQueueNotEmpty.wakeAll();
-        m_VsyncSignalled.wakeAll();
         SDL_WaitThread(m_VsyncThread, nullptr);
+        m_VsyncThread = nullptr;
     }
 
     // Stop V-sync callbacks
@@ -58,8 +68,8 @@ Pacer::~Pacer()
 
     // Stop the render thread
     if (m_RenderThread != nullptr) {
-        m_RenderQueueNotEmpty.wakeAll();
         SDL_WaitThread(m_RenderThread, nullptr);
+        m_RenderThread = nullptr;
     }
     else {
         // Notify the renderer that it is being destroyed soon
@@ -111,10 +121,11 @@ int Pacer::vsyncThread(void *context)
     bool async = me->m_VsyncSource->isAsync();
     while (!me->m_Stopping) {
         if (async) {
-            // Wait for the VSync source to invoke signalVsync() or 100ms to elapse
-            me->m_FrameQueueLock.lock();
-            me->m_VsyncSignalled.wait(&me->m_FrameQueueLock, 100);
-            me->m_FrameQueueLock.unlock();
+            // Single 100 ms deadline preserved across spurious wakes inside
+            // the helper. Whether or not an async callback arrived, we still
+            // proceed to the stopping guard and handleVsync() so the original
+            // ~100 ms pacing fallback fires even with no signal.
+            me->waitForAsyncVsync(100);
         }
         else {
             // Let the VSync source wait in the context of our thread
@@ -149,7 +160,8 @@ int Pacer::renderThread(void* context)
         // the not empty condition
         me->m_FrameQueueLock.lock();
 
-        // Wait for a frame to be ready to render
+        // Wait for a frame to be ready to render. The predicate ensures we
+        // also bail out promptly when the destructor requests shutdown.
         while (!me->m_Stopping && me->m_RenderQueue.isEmpty()) {
             me->m_RenderQueueNotEmpty.wait(&me->m_FrameQueueLock);
         }
@@ -238,15 +250,25 @@ void Pacer::handleVsync(int timeUntilNextVsyncMillis)
         m_FrameQueueLock.lock();
     }
 
+    // Stopping guard: even with a non-empty pacing queue we must not hand a
+    // frame off to the renderer after the destructor has fired.
+    if (m_Stopping) {
+        m_FrameQueueLock.unlock();
+        return;
+    }
+
     if (m_PacingQueue.isEmpty()) {
-        // Wait for a frame to arrive or our V-sync timeout to expire
-        if (!m_PacingQueueNotEmpty.wait(&m_FrameQueueLock, SDL_max(timeUntilNextVsyncMillis, TIMER_SLACK_MS) - TIMER_SLACK_MS)) {
-            // Wait timed out - unlock and bail
-            m_FrameQueueLock.unlock();
-            return;
+        // Single deadline derived from the existing max/slack formula. Held
+        // across the whole wait so the destructor wakeAll is observed
+        // together with the stopping flag.
+        const int timeoutMs = SDL_max(timeUntilNextVsyncMillis, TIMER_SLACK_MS) - TIMER_SLACK_MS;
+        QDeadlineTimer deadline(timeoutMs > 0 ? timeoutMs : 0);
+        while (m_PacingQueue.isEmpty() && !m_Stopping && !deadline.hasExpired()) {
+            m_PacingQueueNotEmpty.wait(&m_FrameQueueLock, deadline);
         }
 
-        if (m_Stopping) {
+        // Bail on shutdown or timeout without dequeueing an empty queue.
+        if (m_Stopping || m_PacingQueue.isEmpty()) {
             m_FrameQueueLock.unlock();
             return;
         }
@@ -327,7 +349,29 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing)
 
 void Pacer::signalVsync()
 {
+    // Hold the lock while setting the pending flag and waking so the waiter's
+    // predicate check and re-enrollment cannot slip between the two.
+    m_FrameQueueLock.lock();
+    m_VsyncPending = true;
     m_VsyncSignalled.wakeOne();
+    m_FrameQueueLock.unlock();
+}
+
+bool Pacer::waitForAsyncVsync(int timeoutMs)
+{
+    // Single QDeadlineTimer wait on a !pending && !stopping predicate so
+    // repeated spurious wakes still respect the original timeout budget and
+    // the pending flag is consumed exactly once under the lock.
+    m_FrameQueueLock.lock();
+    QDeadlineTimer deadline(timeoutMs);
+    while (!m_VsyncPending && !m_Stopping && !deadline.hasExpired()) {
+        m_VsyncSignalled.wait(&m_FrameQueueLock, deadline);
+    }
+    const bool hadPending = m_VsyncPending;
+    m_VsyncPending = false;
+    m_FrameQueueLock.unlock();
+
+    return hadPending && !m_Stopping;
 }
 
 void Pacer::renderFrame(AVFrame* frame)

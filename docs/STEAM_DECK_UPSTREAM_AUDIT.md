@@ -214,3 +214,18 @@ Physical Deck testing and a Vulkan/Flatpak build remain unrun.
 
 [upstream-d3c23b55]: https://github.com/moonlight-stream/moonlight-qt/commit/d3c23b55dcf14d852d735f59625d803512606b09
 [mlqt-1978]: https://github.com/moonlight-stream/moonlight-qt/issues/1978
+
+## 2026-09-05 addendum: pacer synchronization fix
+
+**Branch:** `fix/pacer-wakeups`.
+Headless pacer test target is Linux-only (registered in `tests/tests.pro` under `linux: SUBDIRS += pacer`); Windows/macOS default builds skip it.
+Rejected: VAAPI `extra_hw_frames`-only initial-pool-size change. Modern VAAPI pools grow dynamically, so enlarging fixed pools alone is ineffective here.
+Accepted fix, in `app/streaming/video/ffmpeg-renderers/pacer/{pacer.h,pacer.cpp}`:
+`m_Stopping` is now `std::atomic<bool>`; the destructor acquires `m_FrameQueueLock`, sets the flag and wakes all three conditions under that lock, then unlocks and joins the threads outside the lock, preserving the existing vsync-source delete and frame-queue cleanup order.
+`signalVsync()` flips a `m_VsyncPending` bit under the lock.
+The async vsync waiter uses a single `QDeadlineTimer(100)` predicate wait that preserves the original 100 ms fallback and consumes the pending bit exactly once.
+`handleVsync()` runs the stop guard before any frame handoff and uses a single deadline in the empty-queue wait.
+Queue depth, display periods, frame-drop logic, and rendering lifetimes are unchanged.
+**Validation command:** `mkdir -p /tmp/vibertemis-pacer-final-clean && cd /tmp/vibertemis-pacer-final-clean && qmake6 /home/ubuntu/vibertemis-wt-surface-budget/tests/pacer/pacer.pro && make` then `timeout 30s env QT_QPA_PLATFORM=offscreen ./tst_pacer`. Same recipe with `QMAKE_CXXFLAGS+=-fsanitize=address -fno-omit-frame-pointer` and `QMAKE_LFLAGS+=-fsanitize=address` plus `ASAN_OPTIONS=detect_leaks=1` in `/tmp/vibertemis-pacer-final-asan` for the leak-clean build. App rebuild at `/tmp/vibertemis-pacer-build` (orchestrator-owned) and `git diff --check` are clean; `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s packaging/flatpak/tests -p 'test_*.py'` passes 122 tests; manifest validator satisfied.
+FFmpeg n8.0 references: [vaapi_decode.c](https://github.com/FFmpeg/FFmpeg/blob/n8.0/libavcodec/vaapi_decode.c), [decode.c](https://github.com/FFmpeg/FFmpeg/blob/n8.0/libavcodec/decode.c).
+No hardware claim. Agy/Gemini 3.1 Pro (High) granted source implementation signoff after the callback comment correction and conditionally approved the four follow-up test corrections (stack-only `FakeRenderer`, `m_RendererAttributes=0` for thread-owning tests, post-join assertion in `waitReturnsFalseAfterStop`, `handleVsync(1000)` with `m_Stopping.load()` check in `handleVsyncEmptyQueueBailsOnStop`); Codex verified the corrections; the orchestrator will independently verify before commit.
