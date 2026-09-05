@@ -7,6 +7,7 @@
 
 #include "vaapi.h"
 #include "utils.h"
+#include "rfipolicy.h"
 #include <streaming/streamutils.h>
 
 #ifdef HAVE_LIBVA_DRM
@@ -395,13 +396,17 @@ VAAPIRenderer::initialize(PDECODER_PARAMETERS params)
         return false;
     }
 
-    // The Snap (core22) and Focal/Jammy Mesa drivers have a bug that causes
-    // a large amount of video latency when using more than one reference frame
-    // and severe rendering glitches on my Ryzen 3300U system.
-    m_HasRfiLatencyBug = vendorStr.contains("Gallium", Qt::CaseInsensitive) && qgetenv("IGNORE_RFI_LATENCY_BUG") != "1";
+    // Historical Mesa bug: Snap (core22) / Focal / Jammy Gallium drivers caused
+    // large video latency with more than one reference frame and severe
+    // rendering glitches on the original reporter's Ryzen 3300U.
+    // Upstream Moonlight d3c23b55dcf14d852d735f59625d803512606b09 reports the
+    // issue is no longer reproducible on Ubuntu 24.04 (even with core22), so
+    // the workaround is now opt-in via HAS_RFI_LATENCY_BUG=1. The legacy
+    // opt-out environment variable is no longer read by this code path.
+    m_HasRfiLatencyBug = RfiPolicy::workaroundEnabled(vendorStr);
     if (m_HasRfiLatencyBug) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "VAAPI driver is affected by RFI latency bug");
+                    "VAAPI RFI latency workaround explicitly enabled via HAS_RFI_LATENCY_BUG=1");
     }
 
     if (m_DecoderSelectionPass == 0 && qgetenv("FORCE_VAAPI") != "1") {

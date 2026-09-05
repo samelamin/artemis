@@ -305,6 +305,58 @@ washed-out color, or unexpected SDR tone mapping as failures rather than
 publishing a universal brightness value. Treat Desktop Mode HDR as exploratory,
 not a passed requirement; use Desktop Mode SDR as the supported comparison.
 
+## VAAPI reference-frame invalidation policy
+
+This policy affects only the **VAAPI** renderer on Gallium/Mesa drivers; the
+Vulkan renderer (`plvk.cpp`) is untouched. The workaround was originally a
+workaround against an older Mesa bug that caused large reference-
+frame invalidation latency on Snap (core22) / Focal / Jammy. The upstream
+Moonlight author (commit
+[`d3c23b55`][upstream-d3c23b55]) reports the same bug is no longer
+reproducible on Ubuntu 24.04, so the workaround is now opt-in via
+`HAS_RFI_LATENCY_BUG=1`. The environment variable is evaluated during VAAPI
+initialization in `VAAPIRenderer::initialize()`, not at app startup, and
+`IGNORE_RFI_LATENCY_BUG` no longer controls anything.
+
+### One-shot opt-in run
+
+Quit any running Vibertemis instance through its normal Quit path, then
+launch the development Flatpak with the opt-in environment variable. A
+clean relaunch without the flag restores the default, *provided* no
+persistent `flatpak override --env=` was set elsewhere; legacy
+`IGNORE_RFI_LATENCY_BUG=1` is silently ignored.
+
+```bash
+flatpak run --env=HAS_RFI_LATENCY_BUG=1 com.artemisdesktop.ArtemisDesktopDev
+```
+
+### Deck acceptance procedure (default vs opt-in)
+
+The workaround being on or off can change the selected decoder. For a
+direct RFI comparison the same VAAPI decoder must be used in both runs. If
+the two runs select different decoders, record that selection change
+separately; it does not isolate RFI behavior. Use HEVC SDR on LCD and OLED
+in both Gaming and Desktop modes;
+OLED HDR is optional. Apply a controlled packet-loss profile to the test
+access point or router (do not change application-side knobs), record the
+actual profile value, the statistics-overlay numbers during and after the
+loss window, and the observed recovery time after the profile clears. Record
+the chosen decoder and whether the explicit workaround warning line appears
+in the Vibertemis log; do not record speculative RFI capability bitmasks.
+
+All hardware rows below are **Not run**; this audit does not claim HEVC
+behavior on a real Deck and makes no AV1 hardware claim.
+
+| ID | Deck | Mode | Display | HEVC settings | Loss profile | Evidence | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| F1 | LCD | Gaming | Handheld 1280x800 | HEVC SDR, default rate | Same controlled profile for default and opt-in runs | Chosen decoder, presence of workaround warning, log, stats, recovery | Not run |
+| F2 | LCD | Desktop | Handheld 1280x800 | HEVC SDR, default rate | Same controlled profile for default and opt-in runs | Chosen decoder, presence of workaround warning, log, stats, recovery | Not run |
+| F3 | OLED | Gaming | Handheld 1280x800 | HEVC SDR, 90 Hz/FPS | Same controlled profile for default and opt-in runs | Chosen decoder, presence of workaround warning, log, stats, recovery | Not run |
+| F4 | OLED | Desktop | Handheld 1280x800 | HEVC SDR, 90 Hz/FPS | Same controlled profile for default and opt-in runs | Chosen decoder, presence of workaround warning, log, stats, recovery | Not run |
+| F5 | OLED | Gaming | Handheld 1280x800 | HEVC Main10 HDR, 90 Hz/FPS (optional) | Same controlled profile for default and opt-in runs | Same as F3 plus HDR/no-HDR delta | Not run |
+
+[upstream-d3c23b55]: https://github.com/moonlight-stream/moonlight-qt/commit/d3c23b55dcf14d852d735f59625d803512606b09
+
 ## Frame pacing and latency
 
 - **V-Sync + Frame pacing:** best first choice for consistent motion. Early
@@ -453,6 +505,9 @@ unsupported panel/display rate as failed; record it as blocked with its mode lis
   in one does not imply a pass in the other.
 - Suspend/resume and transient network recovery may terminate a session. A clear
   failure followed by a successful reconnect is acceptable; a lockup is not.
+- VAAPI RFI is enabled by default for Gallium VAAPI paths. The legacy
+  `IGNORE_RFI_LATENCY_BUG=1` opt-out is silently ignored; only
+  `HAS_RFI_LATENCY_BUG=1` re-enables the historical workaround.
 
 ## Primary references
 

@@ -91,3 +91,126 @@ Researched Artemis's Android client and the shared `ClassicOldSong/moonlight-com
 ### Not verified — same limits as the rest of this audit
 
 No qmake/Qt/Flatpak toolchain on this host means the Qt client changes (`session.cpp`, `session.h`, `gamepad.cpp`) are reviewed by hand against confirmed header signatures, not compiled locally. No physical Steam Deck, Apollo, or Vibepollo host was used to confirm the keepalive reduces observed latency spikes or that a host correctly recognizes `LI_CTYPE_STEAM`. These require the project's own Flatpak CI (`dev-build.yml`) for compile verification and a beta tester for the hardware acceptance matrix, per the process this document already establishes.
+
+## 2026-09-05 addendum: VAAPI RFI opt-in (highest-confidence first streaming improvement)
+
+**Audit date:** 2026-09-05
+**Research snapshot:** `research/moonlight-master @ c045ae8986fc7e3b957d5a8b54b487747811525c`
+**Upstream commit:** [`d3c23b55dcf14d852d735f59625d803512606b09`][upstream-d3c23b55] — *Disable the VAAPI RFI latency workaround by default* (Cameron Gutman, 2025-11-30)
+
+This is the first streaming-improvement port in this batch because it is the highest-confidence candidate: a single-file source change with no new renderers, no surface-allocation rework, and the upstream author documents that they could no longer reproduce the bug on Ubuntu 24.04 (even with core22). The accompanying downstream changes here are confined to one new header, one site in `vaapi.cpp`, two test files, one `.pro` registration, and one Python source-contract test.
+
+### What changed in Vibertemis
+
+`app/streaming/video/ffmpeg-renderers/vaapi.cpp` previously computed
+
+```
+m_HasRfiLatencyBug = vendorStr.contains("Gallium", Qt::CaseInsensitive)
+                  && qgetenv("IGNORE_RFI_LATENCY_BUG") != "1";
+```
+
+i.e. the workaround was *on by default* on any Gallium/Mesa driver unless the user explicitly opted out. Upstream's
+[`d3c23b55`][upstream-d3c23b55] inverts that to opt-in (`HAS_RFI_LATENCY_BUG == "1"`) and drops the legacy variable
+entirely. Vibertemis follows upstream, but routes the policy through a tiny inline helper
+`RfiPolicy::workaroundEnabled(vendorString)` in a new `app/streaming/video/ffmpeg-renderers/rfipolicy.h` so the
+contract is unit-testable without spinning up a VAAPI display.
+
+Net effect:
+
+- Modern AMD VAAPI HEVC and AV1 reference-frame invalidation is **advertised by default** via
+  `getDecoderCapabilities()` returning `CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC |
+  CAPABILITY_REFERENCE_FRAME_INVALIDATION_AV1`.
+- VAAPI is no longer **deprioritized on the first selection pass** on Gallium drivers in the
+  default policy. Other `VAAPIRenderer::initialize()` fallback branches (libva-major==0 on
+  pre-2.x stacks; X11+NVDEC; `FORCE_VAAPI=1` override) are untouched; VAAPI is not
+  universally preferred, only the historical Gallium opt-out is removed.
+- The startup warning now reads `VAAPI RFI latency workaround explicitly enabled via HAS_RFI_LATENCY_BUG=1`
+  when the helper returns true. The previous wording falsely claimed a driver defect had been detected; the
+  new wording matches what the user actually did.
+
+### Implementation plan
+
+| Step | Change | Contract / edge case |
+| --- | --- | --- |
+| 1 | New header `app/streaming/video/ffmpeg-renderers/rfipolicy.h` exposing `RfiPolicy::isGalliumDriver(QString)`, `RfiPolicy::workaroundOptedIn()`, and `RfiPolicy::workaroundEnabled(QString)`. All three are `inline`; the header has no `.cpp`. | Helper is the only call site that reads `HAS_RFI_LATENCY_BUG`. Legacy `IGNORE_RFI_LATENCY_BUG` is removed from the call site. |
+| 2 | Replace the inline `m_HasRfiLatencyBug` assignment with `m_HasRfiLatencyBug = RfiPolicy::workaroundEnabled(vendorStr);` in `vaapi.cpp`. | Same Gallium case-insensitive match; opt-in condition is now `qgetenv("HAS_RFI_LATENCY_BUG") == "1"` (exact). |
+| 3 | Reword the conditional `SDL_LogWarn` to mention `HAS_RFI_LATENCY_BUG=1`. | The capability gate in `getDecoderCapabilities()` is unchanged and still keys off `m_HasRfiLatencyBug`, so HEVC/AV1 RFI capability is suppressed only when the user opted in. |
+| 4 | Register `rfipolicy.h` in `app/app.pro` under the existing `libva` block, and add `tests/rfipolicy` to `tests/tests.pro`. | Header is in the build graph; new subdir test runs alongside the existing ones. |
+| 5 | QtTest data tests under `tests/rfipolicy/tst_rfipolicy.cpp` exercise the helper directly. | `initTestCase`/`cleanupTestCase` snapshot both `HAS_RFI_LATENCY_BUG` and `IGNORE_RFI_LATENCY_BUG`, restore on exit; rows cover Gallium lowercase / UPPERCASE / mixed case, non-Gallium and empty vendor strings, env values unset / `""` / `0` / `1` / `true` / `01`, and legacy `IGNORE_RFI_LATENCY_BUG` values `0` / `1` / `""` / unset. Helper requires the exact value `"1"`. |
+| 6 | Add a narrow production-wiring contract to `packaging/flatpak/tests/test_upstream_ports.py` (`test_rfi_workaround_uses_helper_and_opt_in_env`). | Asserts the header declares the namespace and the `workaroundEnabled` member, the call site is `RfiPolicy::workaroundEnabled(vendorStr)`, legacy `IGNORE_RFI_LATENCY_BUG` is gone from `vaapi.cpp`, the warning string names `HAS_RFI_LATENCY_BUG=1`, the actual capability-gate function body gates on `m_HasRfiLatencyBug`, the header is listed in `app/app.pro` and `tests/rfipolicy/rfipolicy.pro`, and `tests/tests.pro` includes the new subdir. |
+
+### Validation performed
+
+- Full Linux VAAPI/EGL app build by Codex at `/tmp/vibertemis-decoder-build` against Qt 6.10.2, SDL 2.32.10,
+  FFmpeg libavcodec 62.11.100. No `libplacebo` is installed in that environment, so the Vulkan / Flatpak
+  build path was not exercised there. This is reported as a build-environment limit, not a port deficiency.
+- `tests/rfipolicy` builds and runs under `qmake6` from the absolute-source project file (no copy of
+  `tst_rfipolicy.cpp`) in `/tmp/vibertemis-rfi-review-tests` with `QT_QPA_PLATFORM=offscreen`; all 32 rows
+  across the four data tables pass. The build is deliberately scoped to the helper and its QtTest host;
+  `vaapi.cpp` is not re-linked.
+- `python3 -m unittest discover -s packaging/flatpak/tests -p 'test_*.py'` (with
+  `PYTHONDONTWRITEBYTECODE=1`) passes 122 tests including the new
+  `test_rfi_workaround_uses_helper_and_opt_in_env` contract and the six
+  new `FlatpakDocumentationRegressionTests` parser cases, alongside the
+  existing upstream-port contracts.
+- `python3 packaging/flatpak/validate-manifest.py packaging/flatpak/com.artemisdesktop.ArtemisDesktopDev.json`
+  still validates the tracked manifest (no manifest changes in this port).
+- `git diff --check` is clean.
+
+### Validation limits (explicitly not claimed)
+
+- **No benchmarks, no hardware validation.** This document does not claim reduced latency, fewer stalls, or
+  better recovery on a real Deck. The acceptance procedure is recorded in `docs/STEAM_DECK.md` under *VAAPI
+  reference-frame invalidation policy > Deck acceptance procedure*; running it on hardware is a beta-tester
+  item.
+- **No AV1 hardware claim.** The Deck acceptance matrix is HEVC-only. The Flatpak probe only confirms
+  VAAPI/Vulkan decoder configuration strings are present, not that Steam Deck hardware accelerates AV1
+  decoding or AV1 RFI.
+- **No change to the wider decoder subsystem.** `ffmpeg.cpp`, `plvk.cpp`, and `eglimagefactory.cpp` are
+  untouched. The vendor `m_HasRfiLatencyBug` member still feeds only the capability gate and the legacy
+  VDPAU deprioritization; it does not influence any buffer-pool or retention code.
+
+### Deferred candidates from this audit pass
+
+The same research snapshot surfaced three further improvements that were ranked below RFI for this batch.
+They are recorded here so the next review pass has a starting point, not because they are being deferred
+silently.
+
+- **Decoder pool-size / retention rework.** Moonlight's relevant work is the `extra_hw_frames` allowance
+  for the VAAPI/EGL frame-pool, intertwined with retention and surface-bound handling. Vibertemis's EGL
+  renderer already moves the last decoded frame forward (`m_LastFrame` in `eglvid.cpp`), so any upstream
+  pool-size change is *additive* here and needs a measured comparison on actual Deck hardware, not a
+  straight port. Deferred until a benchmark target is agreed.
+- **Audio queue ceiling** ([moonlight-qt#1978][mlqt-1978]). A single reporter measured an SDL-audio discard /
+  backpressure cycle on SteamOS 3.8.16; this is not multi-user CPU-starvation evidence. Raising the queue
+  ceiling is a one-line change but the right value is host- and CPU-class-dependent, so it needs more
+  measurements before any number is committed. Deferred pending measurement data.
+- **`nanors` SIMD-accelerated Reed-Solomon FEC.** Already deferred in the 2026-08-22 addendum; this batch
+  did not re-verify the fork gap. Porting remains invasive (SIMD dispatch, GFNI runtime detection, conflict
+  with `c86e053` small-MTU work) and is not on this batch's critical path.
+
+### Consultation outcome
+
+Agy/Gemini 3.1 Pro (High) gave a conditional implementation signoff contingent on the following named
+corrections to this addendum and to `docs/STEAM_DECK.md`:
+
+- Treat the affected renderer as VAAPI/Gallium only; do not describe the Vulkan renderer as affected.
+- Remove the speculative claim that current SteamOS is fixed; cite the upstream author's Ubuntu 24.04
+  report instead.
+- Drop the `flatpak kill` step from the one-shot opt-in; rely on the user's normal Quit path.
+- Replace any invented Moonlight `--packet-loss` / `--latency` CLI harness with an external router / network
+  impairment note.
+- Treat the chosen decoder as evidence, not RFI capability bitmasks, and require the same VAAPI decoder in
+  both default and opt-in runs for a direct RFI comparison.
+- Distinguish first-pass fallback from second-pass, and avoid implying VAAPI is universally preferred.
+- Replace multi-user audio backlog language with a single-reporter SteamOS 3.8.16 cycle measurement, and
+  avoid any new benchmarking claims.
+
+All seven named corrections have been applied in this revision. Codex independently verified the
+final production policy and the named documentation corrections. Agy/Gemini 3.1 Pro (High) approved
+the implementation conditional on those corrections; no production-code blockers were found. Validation
+above covers the Linux VAAPI/EGL build, 32 QtTest cases, 122 Python checks, and manifest validation.
+Physical Deck testing and a Vulkan/Flatpak build remain unrun.
+
+[upstream-d3c23b55]: https://github.com/moonlight-stream/moonlight-qt/commit/d3c23b55dcf14d852d735f59625d803512606b09
+[mlqt-1978]: https://github.com/moonlight-stream/moonlight-qt/issues/1978

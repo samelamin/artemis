@@ -77,6 +77,83 @@ class UpstreamPortContractTests(unittest.TestCase):
             ),
         )
 
+    def test_rfi_workaround_uses_helper_and_opt_in_env(self):
+        header = (
+            REPOSITORY_ROOT
+            / "app/streaming/video/ffmpeg-renderers/rfipolicy.h"
+        ).read_text(encoding="utf-8")
+        source = (
+            REPOSITORY_ROOT / "app/streaming/video/ffmpeg-renderers/vaapi.cpp"
+        ).read_text(encoding="utf-8")
+        pro = (REPOSITORY_ROOT / "app/app.pro").read_text(encoding="utf-8")
+        tests_pro = (
+            REPOSITORY_ROOT / "tests/tests.pro"
+        ).read_text(encoding="utf-8")
+        rfi_pro = (
+            REPOSITORY_ROOT / "tests/rfipolicy/rfipolicy.pro"
+        ).read_text(encoding="utf-8")
+
+        # Header declares the namespace and exposes the new opt-in member.
+        self.assertRegex(
+            header,
+            re.compile(r"namespace\s+RfiPolicy\s*\{"),
+        )
+        self.assertRegex(
+            header,
+            re.compile(
+                r"inline\s+bool\s+workaroundEnabled\s*\(\s*const\s+QString\s*&"
+            ),
+        )
+        self.assertIn("HAS_RFI_LATENCY_BUG", header)
+        self.assertNotIn("IGNORE_RFI_LATENCY_BUG", header)
+
+        # VAAPI renderer initializes the workaround through the helper.
+        self.assertRegex(
+            source,
+            re.compile(
+                r"m_HasRfiLatencyBug\s*=\s*RfiPolicy::workaroundEnabled\(vendorStr\);"
+            ),
+        )
+
+        # Legacy env name no longer controls the policy in vaapi.cpp nor in
+        # the helper. This is the source-level proof that an explicit
+        # HAS_RFI_LATENCY_BUG=1 opt-in is honored regardless of whether the
+        # legacy IGNORE_RFI_LATENCY_BUG variable is set to "0" or "1".
+        self.assertNotIn("IGNORE_RFI_LATENCY_BUG", source)
+        self.assertNotIn("IGNORE_RFI_LATENCY_BUG", header)
+
+        # Warning says the workaround was explicitly enabled, not that a
+        # driver defect was detected.
+        self.assertRegex(
+            source,
+            re.compile(
+                r"VAAPI RFI latency workaround explicitly enabled via HAS_RFI_LATENCY_BUG=1"
+            ),
+        )
+
+        # Capability gate is the actual function body, not bare strings.
+        # getDecoderCapabilities() must gate CAPABILITY_REFERENCE_FRAME_INVALIDATION_*
+        # on m_HasRfiLatencyBug, so a future drive-by edit cannot silently
+        # decouple the two.
+        capability_body = re.search(
+            r"int\s+VAAPIRenderer::getDecoderCapabilities\(\)\s*\{.*?\n\}",
+            source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(
+            capability_body,
+            "VAAPIRenderer::getDecoderCapabilities() body not found",
+        )
+        body = capability_body.group(0)
+        self.assertIn("m_HasRfiLatencyBug", body)
+        self.assertIn("CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC", body)
+        self.assertIn("CAPABILITY_REFERENCE_FRAME_INVALIDATION_AV1", body)
+
+        # Header is wired into the app build graph and the test suite.
+        self.assertIn("streaming/video/ffmpeg-renderers/rfipolicy.h", pro)
+        self.assertIn("rfipolicy", tests_pro)
+        self.assertIn("streaming/video/ffmpeg-renderers/rfipolicy.h", rfi_pro)
+
 
 if __name__ == "__main__":
     unittest.main()
