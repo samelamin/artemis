@@ -3,6 +3,8 @@
 #include <QProcessEnvironment>
 #include <QTemporaryFile>
 
+#include <Limelight.h>
+
 #include "backend/steamdecksession.h"
 #include "settings/refreshrateparser.h"
 #include "streaming/virtualdisplaylaunch.h"
@@ -45,6 +47,11 @@ private slots:
     void connectionAttemptStateResetClearsAllSignals();
     void reconnectClassificationIgnoresLeftoverIntentionalAndStartedFlags();
     void gamescopeWsiEnablesOnlyInGamescopeSessionWithLayerPresent();
+    void rtspSessionUrlFromStorageReturnsNullForEmptyLegacyUrl();
+    void rtspSessionUrlFromStorageReturnsPointerIntoStorageForReturnedUrl();
+    void rtspSessionUrlHandoffPopulatesHostInfoFromOwnedStorage();
+    void rtspSessionUrlHandoffWithEmptyLegacyUrlLeavesHostInfoNull();
+    void rtspSessionUrlHandoffSurvivesConnectRetriesWithReturnedUrl();
 };
 
 void VirtualDisplayLaunchTest::resolveEffectiveSopsForcesNonNvidiaVirtualDisplay()
@@ -863,6 +870,191 @@ void VirtualDisplayLaunchTest::gamescopeWsiEnablesOnlyInGamescopeSessionWithLaye
         gamescopeEnv.insert(QStringLiteral("DISABLE_GAMESCOPE_WSI"), QStringLiteral("1"));
         QVERIFY(!SteamDeckSession::shouldEnableGamescopeWsi(gamescopeEnv, existingPath));
     }
+}
+
+void VirtualDisplayLaunchTest::rtspSessionUrlFromStorageReturnsNullForEmptyLegacyUrl()
+{
+    // Empty storage -> nullptr (legacy Sunshine / old GFE no-URL path).
+    QCOMPARE(
+        VirtualDisplayLaunchPolicy::rtspSessionUrlFromStorage(QByteArray()),
+        static_cast<const char*>(nullptr));
+}
+
+void VirtualDisplayLaunchTest::rtspSessionUrlFromStorageReturnsPointerIntoStorageForReturnedUrl()
+{
+    // Non-empty storage -> pointer into the same QByteArray so callers
+    // can rely on bytewise lifetime for retry attempts.
+    const QByteArray storage =
+        QByteArrayLiteral("rtspenc://example.local:9999/1234abcd");
+    const char* returned =
+        VirtualDisplayLaunchPolicy::rtspSessionUrlFromStorage(storage);
+    QVERIFY(returned != nullptr);
+    QCOMPARE(returned, storage.constData());
+    QCOMPARE(QByteArray(returned), storage);
+}
+
+void VirtualDisplayLaunchTest::rtspSessionUrlHandoffPopulatesHostInfoFromOwnedStorage()
+{
+    // Mirror the production wiring: launch mirrors /launch URL into a
+    // QByteArray; connect repopulates hostInfo.rtspSessionUrl from that
+    // storage before LiStartConnection() would be invoked.
+    VirtualDisplayLaunchPolicy::ConnectionAttemptState state;
+    VirtualDisplayLaunchPolicy::ConnectionCancellation cancellation;
+    QByteArray rtspSessionUrlStorage;
+    QString rtspSessionUrl;
+    SERVER_INFORMATION hostInfo = {};
+    const QByteArray returnedUrl =
+        QByteArrayLiteral("rtspenc://deck-host.local:9998/deadbeef");
+
+    const VirtualDisplayLaunchPolicy::ConnectionRetryOperations operations = {
+        [&rtspSessionUrl, &rtspSessionUrlStorage, returnedUrl]() {
+            rtspSessionUrl = QString::fromLatin1(returnedUrl);
+            if (!rtspSessionUrl.isEmpty()) {
+                rtspSessionUrlStorage = rtspSessionUrl.toLatin1();
+            }
+            return true;
+        },
+        [&hostInfo, &rtspSessionUrlStorage](int) {
+            hostInfo.rtspSessionUrl =
+                VirtualDisplayLaunchPolicy::rtspSessionUrlFromStorage(
+                    rtspSessionUrlStorage);
+            return 0;
+        },
+        [](int) {}
+    };
+    const VirtualDisplayLaunchPolicy::ConnectionRetryCallbacks callbacks = {
+        nullptr, nullptr, nullptr, nullptr, nullptr
+    };
+
+    QVERIFY(VirtualDisplayLaunchPolicy::runConnectionAttempts(
+        3, state, cancellation, operations, callbacks));
+
+    // Pointer must point into the still-live QByteArray and equal the URL.
+    QVERIFY(hostInfo.rtspSessionUrl != nullptr);
+    QCOMPARE(QByteArray(hostInfo.rtspSessionUrl), returnedUrl);
+    // Pointer-stability: appending to the source QString must not dangle it.
+    rtspSessionUrl.append(QLatin1String("discarded"));
+    QVERIFY(hostInfo.rtspSessionUrl != nullptr);
+    QCOMPARE(QByteArray(hostInfo.rtspSessionUrl), returnedUrl);
+}
+
+void VirtualDisplayLaunchTest::rtspSessionUrlHandoffWithEmptyLegacyUrlLeavesHostInfoNull()
+{
+    // /launch returns no URL -> storage stays empty -> hostInfo.rtspSessionUrl
+    // must remain nullptr across every retry.
+    VirtualDisplayLaunchPolicy::ConnectionAttemptState state;
+    VirtualDisplayLaunchPolicy::ConnectionCancellation cancellation;
+    QByteArray rtspSessionUrlStorage;
+    QString rtspSessionUrl;
+    SERVER_INFORMATION hostInfo = {};
+
+    int connectCount = 0;
+    QByteArray urlSeenAtAttempt[3] = { QByteArray(), QByteArray(), QByteArray() };
+    bool nullAtAttempt[3] = { false, false, false };
+
+    const VirtualDisplayLaunchPolicy::ConnectionRetryOperations operations = {
+        [&rtspSessionUrl, &rtspSessionUrlStorage]() {
+            rtspSessionUrl.clear();
+            rtspSessionUrlStorage.clear();
+            return true;
+        },
+        [&hostInfo, &rtspSessionUrlStorage, &connectCount,
+         &urlSeenAtAttempt, &nullAtAttempt](int) {
+            connectCount++;
+            hostInfo.rtspSessionUrl =
+                VirtualDisplayLaunchPolicy::rtspSessionUrlFromStorage(
+                    rtspSessionUrlStorage);
+            int idx = connectCount - 1;
+            if (idx >= 0 && idx < 3) {
+                nullAtAttempt[idx] = (hostInfo.rtspSessionUrl == nullptr);
+                urlSeenAtAttempt[idx] =
+                    hostInfo.rtspSessionUrl
+                        ? QByteArray(hostInfo.rtspSessionUrl)
+                        : QByteArray();
+            }
+            return connectCount == 3 ? 0 : -1;
+        },
+        [](int) {}
+    };
+    const VirtualDisplayLaunchPolicy::ConnectionRetryCallbacks callbacks = {
+        nullptr, nullptr, nullptr, nullptr, nullptr
+    };
+
+    QVERIFY(VirtualDisplayLaunchPolicy::runConnectionAttempts(
+        3, state, cancellation, operations, callbacks));
+
+    QVERIFY(rtspSessionUrlStorage.isEmpty());
+    QCOMPARE(connectCount, 3);
+    QCOMPARE(hostInfo.rtspSessionUrl, static_cast<const char*>(nullptr));
+    for (int i = 0; i < 3; i++) {
+        QVERIFY2(nullAtAttempt[i], qPrintable(QStringLiteral(
+            "attempt %1 must see nullptr URL, got '%2'")
+            .arg(i + 1).arg(QString::fromLatin1(urlSeenAtAttempt[i]))));
+        QVERIFY(urlSeenAtAttempt[i].isEmpty());
+    }
+}
+
+void VirtualDisplayLaunchTest::rtspSessionUrlHandoffSurvivesConnectRetriesWithReturnedUrl()
+{
+    // /launch returns a URL but the first two connects fail. The URL bytes
+    // must remain alive and pointed-to by hostInfo.rtspSessionUrl at every
+    // attempt, including the successful third.
+    VirtualDisplayLaunchPolicy::ConnectionAttemptState state;
+    VirtualDisplayLaunchPolicy::ConnectionCancellation cancellation;
+    QByteArray rtspSessionUrlStorage;
+    QString rtspSessionUrl;
+    SERVER_INFORMATION hostInfo = {};
+    const QByteArray returnedUrl =
+        QByteArrayLiteral("rtspenc://deck-host.local:9998/abcd1234");
+
+    int launchCount = 0;
+    int connectCount = 0;
+    QByteArray urlSeenAtAttempt[3];
+    bool nonNullAtAttempt[3] = { false, false, false };
+
+    const VirtualDisplayLaunchPolicy::ConnectionRetryOperations operations = {
+        [&rtspSessionUrl, &rtspSessionUrlStorage, &launchCount, returnedUrl]() {
+            launchCount++;
+            rtspSessionUrl = QString::fromLatin1(returnedUrl);
+            if (!rtspSessionUrl.isEmpty()) {
+                rtspSessionUrlStorage = rtspSessionUrl.toLatin1();
+            }
+            return true;
+        },
+        [&hostInfo, &rtspSessionUrlStorage, &connectCount,
+         &urlSeenAtAttempt, &nonNullAtAttempt](int) {
+            connectCount++;
+            hostInfo.rtspSessionUrl =
+                VirtualDisplayLaunchPolicy::rtspSessionUrlFromStorage(
+                    rtspSessionUrlStorage);
+            int idx = connectCount - 1;
+            if (idx >= 0 && idx < 3) {
+                nonNullAtAttempt[idx] = (hostInfo.rtspSessionUrl != nullptr);
+                urlSeenAtAttempt[idx] =
+                    hostInfo.rtspSessionUrl
+                        ? QByteArray(hostInfo.rtspSessionUrl)
+                        : QByteArray();
+            }
+            return connectCount < 3 ? -1 : 0;
+        },
+        [](int) {}
+    };
+    const VirtualDisplayLaunchPolicy::ConnectionRetryCallbacks callbacks = {
+        nullptr, nullptr, nullptr, nullptr, nullptr
+    };
+
+    QVERIFY(VirtualDisplayLaunchPolicy::runConnectionAttempts(
+        3, state, cancellation, operations, callbacks));
+
+    QCOMPARE(launchCount, 1);
+    QCOMPARE(connectCount, 3);
+    for (int i = 0; i < 3; i++) {
+        QVERIFY2(nonNullAtAttempt[i], qPrintable(QStringLiteral(
+            "attempt %1 must see non-null URL").arg(i + 1)));
+        QCOMPARE(urlSeenAtAttempt[i], returnedUrl);
+    }
+    QCOMPARE(QByteArray(hostInfo.rtspSessionUrl), returnedUrl);
+    QCOMPARE(hostInfo.rtspSessionUrl, rtspSessionUrlStorage.constData());
 }
 
 QTEST_GUILESS_MAIN(VirtualDisplayLaunchTest)

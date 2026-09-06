@@ -1965,7 +1965,10 @@ bool Session::startConnectionAsync(bool resumeOnly, bool announceRetry)
     QByteArray hostnameStr = m_Computer->activeAddress.address().toLatin1();
     QByteArray siAppVersion = m_Computer->appVersion.toLatin1();
 
+    // I1: zero-init hostInfo so uninitialized stack memory never reaches
+    // LiStartConnection() on the first attempt before launch populates it.
     SERVER_INFORMATION hostInfo;
+    LiInitializeServerInformation(&hostInfo);
     hostInfo.address = hostnameStr.data();
     hostInfo.serverInfoAppVersion = siAppVersion.data();
     hostInfo.serverCodecModeSupport = m_Computer->serverCodecModeSupport;
@@ -1979,12 +1982,8 @@ bool Session::startConnectionAsync(bool resumeOnly, bool announceRetry)
         hostInfo.serverInfoGfeVersion = siGfeVersion.data();
     }
 
-    // Older GFE and Sunshine versions didn't have this field
-    QByteArray rtspSessionUrlStr;
-    if (!rtspSessionUrl.isEmpty()) {
-        rtspSessionUrlStr = rtspSessionUrl.toLatin1();
-        hostInfo.rtspSessionUrl = rtspSessionUrlStr.data();
-    }
+    // I4: owned byte storage; must outlive every retry of operations.connect.
+    QByteArray rtspSessionUrlStorage;
 
     if (m_Preferences->packetSize != 0) {
         // Override default packet size and remote streaming detection
@@ -2056,7 +2055,7 @@ bool Session::startConnectionAsync(bool resumeOnly, bool announceRetry)
     }
 
     const VirtualDisplayLaunchPolicy::ConnectionRetryOperations operations = {
-        [this, &rtspSessionUrl, resumeOnly, &effectiveSops]() {
+        [this, &rtspSessionUrl, &rtspSessionUrlStorage, resumeOnly, &effectiveSops]() {
             try {
                 NvHTTP http(m_Computer);
                 http.startApp(resumeOnly || m_Computer->currentGameId != 0
@@ -2071,6 +2070,11 @@ bool Session::startConnectionAsync(bool resumeOnly, bool announceRetry)
                               m_InputHandler->getAttachedGamepadMask(),
                               !m_Preferences->multiController,
                               rtspSessionUrl);
+                // I2: storage write MUST happen after http.startApp so the
+                // populated URL (or empty, for legacy hosts) is captured.
+                if (!rtspSessionUrl.isEmpty()) {
+                    rtspSessionUrlStorage = rtspSessionUrl.toLatin1();
+                }
                 return true;
             }
             catch (const GfeHttpResponseException& e) {
@@ -2083,10 +2087,14 @@ bool Session::startConnectionAsync(bool resumeOnly, bool announceRetry)
                 return false;
             }
         },
-        [this, &hostInfo](int attemptIndex) {
+        [this, &hostInfo, &rtspSessionUrlStorage](int attemptIndex) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Virtual display connection attempt %d starting",
                         attemptIndex + 1);
+            // I3: assign hostInfo.rtspSessionUrl from owned storage BEFORE
+            // LiStartConnection(); empty storage -> nullptr (legacy path).
+            hostInfo.rtspSessionUrl =
+                VirtualDisplayLaunchPolicy::rtspSessionUrlFromStorage(rtspSessionUrlStorage);
             const int returnCode = LiStartConnection(
                 &hostInfo,
                 &m_StreamConfig,
