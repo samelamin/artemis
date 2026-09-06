@@ -207,6 +207,11 @@ bool canResumeExistingHostSession(int expectedAppId, int currentGameId)
     return expectedAppId > 0 && expectedAppId == currentGameId;
 }
 
+const char* rtspSessionUrlFromStorage(const QByteArray& storage)
+{
+    return storage.isEmpty() ? nullptr : storage.constData();
+}
+
 bool shouldSurfaceRecovery(int errorCode,
                            bool intentionalLocal,
                            bool connectionStarted)

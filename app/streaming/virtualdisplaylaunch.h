@@ -3,6 +3,8 @@
 #include <atomic>
 #include <functional>
 
+#include <QByteArray>
+
 namespace VirtualDisplayLaunchPolicy {
 
 static const int kVirtualDisplayConnectionAttempts = 3;
@@ -123,6 +125,26 @@ bool explicitHdrCanStart(bool hdrEnabled,
                         bool hostSupports10Bit);
 bool isRecoverableTermination(int errorCode);
 bool canResumeExistingHostSession(int expectedAppId, int currentGameId);
+
+// Mirrors the RTSP session URL into a SERVER_INFORMATION field that
+// LiStartConnection() consumes. The host sometimes returns a non-empty
+// "sessionUrl0" inside the /launch (or /resume) response; that URL is
+// the one the streaming protocol must use. Other hosts (older GFE,
+// Sunshine) omit the field and expect the legacy code path instead.
+//
+// `storage` is the QByteArray that owns the bytes after a successful
+// launch; it must outlive every SERVER_INFORMATION assignment produced
+// by this helper, because the returned pointer is stored in the struct
+// and passed to LiStartConnection() on every connect attempt. Pass an
+// empty QByteArray to mean "no URL was returned" - this returns
+// nullptr, which Li recognizes as the legacy / no-URL code path.
+//
+// Keeping the mapping here lets Session::startConnectionAsync() make
+// the assignment in exactly one place and lets the virtualdisplay
+// regression suite pin all three behaviours (production handoff,
+// non-default URL, empty legacy URL) without re-implementing the
+// production empty-URL rule.
+const char* rtspSessionUrlFromStorage(const QByteArray& storage);
 
 bool shouldSurfaceRecovery(int errorCode,
                            bool intentionalLocal,

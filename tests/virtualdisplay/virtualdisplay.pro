@@ -6,6 +6,7 @@ TEMPLATE = app
 TARGET = tst_virtualdisplay
 
 INCLUDEPATH += $$PWD/../../app
+INCLUDEPATH += $$PWD/../../moonlight-common-c/moonlight-common-c/src
 
 SOURCES += \
     tst_virtualdisplay.cpp \
